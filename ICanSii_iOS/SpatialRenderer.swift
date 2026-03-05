@@ -91,6 +91,7 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
     private var yaw: Float = 0.0
     private var pitch: Float = 0.0
     private var cameraDistance: Float = 3.0
+    private var targetOffset = SIMD2<Float>(0, 0)
     
     // Etat d'enregistrement
     private var isRecording: Bool = false
@@ -182,6 +183,16 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
         frameLock.lock()
         // Un pinch (agrandir) réduit la distance (on avance), réduire l'écran l'augmente
         cameraDistance = min(max(cameraDistance / factor, 0.5), 15.0)
+        frameLock.unlock()
+    }
+
+    func translate(deltaX: Float, deltaY: Float) {
+        frameLock.lock()
+        // Inversion des signes pour que le nuage suive naturellement les doigts :
+        // Swipe droite (+X) = Déplace le nuage à droite (+X)
+        // Swipe bas (+Y écran) = Déplace le nuage vers le bas (-Y 3D)
+        targetOffset.x += deltaX
+        targetOffset.y -= deltaY
         frameLock.unlock()
     }
 
@@ -285,10 +296,13 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
         let aspect = Float(view.bounds.width / view.bounds.height)
         let projection = simd_float4x4.perspective(fovy: .pi / 3, aspect: aspect, near: 0.05, far: 50.0)
         
-        // Caméra orbitale en espace ARKit (Monde absolu)
-        let viewMatrix = simd_float4x4.translation(SIMD3<Float>(0, 0, -distance)) *
-                         simd_float4x4.rotation(angle: pitch, axis: SIMD3<Float>(1, 0, 0)) *
-                         simd_float4x4.rotation(angle: yaw, axis: SIMD3<Float>(0, 1, 0))
+        // Caméra orbitale en espace ARKit (Monde absolu) avec support du décalage cible (Target Offset)
+        let orbitTranslation = simd_float4x4.translation(SIMD3<Float>(0, 0, -distance))
+        let rotationX = simd_float4x4.rotation(angle: pitch, axis: SIMD3<Float>(1, 0, 0))
+        let rotationY = simd_float4x4.rotation(angle: yaw, axis: SIMD3<Float>(0, 1, 0))
+        let targetTranslation = simd_float4x4.translation(SIMD3<Float>(targetOffset.x, targetOffset.y, 0))
+        
+        let viewMatrix = orbitTranslation * rotationX * rotationY * targetTranslation
         
         var uniforms = AccumulatedRenderUniforms(
             viewProjection: projection * viewMatrix,

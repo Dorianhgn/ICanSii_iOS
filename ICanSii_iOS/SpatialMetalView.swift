@@ -37,6 +37,12 @@ struct SpatialMetalView: UIViewRepresentable {
         let pinch = UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePinch(_:)))
         view.addGestureRecognizer(pinch)
 
+        // Ajout du Pan à 2 doigts pour la translation (déplacement X/Y)
+        let twoFingerPan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTwoFingerPan(_:)))
+        twoFingerPan.minimumNumberOfTouches = 2
+        twoFingerPan.maximumNumberOfTouches = 2
+        view.addGestureRecognizer(twoFingerPan)
+
         return view
     }
 
@@ -62,6 +68,15 @@ struct SpatialMetalView: UIViewRepresentable {
             let scale = Float(gesture.scale)
             gesture.scale = 1.0 // Reset après application
             renderer?.zoom(factor: scale)
+        }
+
+        @objc func handleTwoFingerPan(_ gesture: UIPanGestureRecognizer) {
+            let translation = gesture.translation(in: gesture.view)
+            gesture.setTranslation(.zero, in: gesture.view)
+
+            let dx = Float(translation.x) * 0.005
+            let dy = Float(translation.y) * 0.005
+            renderer?.translate(deltaX: dx, deltaY: dy)
         }
     }
 }

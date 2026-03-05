@@ -155,7 +155,15 @@ extension ARManager: ARSessionDelegate {
 
         // On obtient la bonne transformation (Rotation / Crop) pour passer du 
         // format natif de la caméra (paysage) à l'orientation affichée de l'iPhone.
-        let displayTransform = frame.displayTransform(for: .portrait, viewportSize: UIScreen.main.bounds.size)
+        // Récupération moderne de la taille de l'écran sans utiliser UIScreen.main
+        let viewportSize: CGSize
+        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+            viewportSize = windowScene.screen.bounds.size
+        } else {
+            viewportSize = CGSize(width: 393, height: 852) // Fallback standard iPhone Pro
+        }
+        
+        let displayTransform = frame.displayTransform(for: .portrait, viewportSize: viewportSize)
 
         // Création de notre objet "SpatialFrame" intermédiaire. Cet objet va encapsuler 
         // la photo (couleur), la matrice de profondeur, et les infos spatiales.
