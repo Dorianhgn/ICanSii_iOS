@@ -5,19 +5,20 @@ struct SpatialMetalView: UIViewRepresentable {
     @ObservedObject var arManager: ARManager
     var mode: SpatialDisplayMode
     var maxDistance: Float
+    var isRecording: Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
     }
 
     func makeUIView(context: Context) -> MTKView {
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            return MTKView(frame: .zero)
-        }
+        guard let device = MTLCreateSystemDefaultDevice() else { return MTKView(frame: .zero) }
 
         let view = MTKView(frame: .zero, device: device)
         view.clearColor = MTLClearColorMake(0.02, 0.02, 0.02, 1.0)
         view.colorPixelFormat = .bgra8Unorm
+        // Important pour l'occlusion 3D du nuage enregistré
+        view.depthStencilPixelFormat = .depth32Float
         view.preferredFramesPerSecond = 60
         view.enableSetNeedsDisplay = false
         view.isPaused = false
@@ -27,9 +28,14 @@ struct SpatialMetalView: UIViewRepresentable {
         view.delegate = context.coordinator.renderer
         context.coordinator.renderer?.setMode(mode)
         context.coordinator.renderer?.setMaxDistance(maxDistance)
+        context.coordinator.renderer?.setRecording(isRecording)
 
         let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan(_:)))
         view.addGestureRecognizer(pan)
+        
+        // Ajout du Pinch pour Zoomer/Avancer dans le nuage
+        let pinch = UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePinch(_:)))
+        view.addGestureRecognizer(pinch)
 
         return view
     }
@@ -37,6 +43,7 @@ struct SpatialMetalView: UIViewRepresentable {
     func updateUIView(_ uiView: MTKView, context: Context) {
         context.coordinator.renderer?.setMode(mode)
         context.coordinator.renderer?.setMaxDistance(maxDistance)
+        context.coordinator.renderer?.setRecording(isRecording)
     }
 
     final class Coordinator: NSObject {
@@ -46,9 +53,15 @@ struct SpatialMetalView: UIViewRepresentable {
             let translation = gesture.translation(in: gesture.view)
             gesture.setTranslation(.zero, in: gesture.view)
 
-            let dx = Float(translation.x) * 0.01
-            let dy = Float(translation.y) * 0.01
+            let dx = Float(translation.x) * 0.005
+            let dy = Float(translation.y) * 0.005
             renderer?.rotate(deltaX: dx, deltaY: dy)
+        }
+        
+        @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+            let scale = Float(gesture.scale)
+            gesture.scale = 1.0 // Reset après application
+            renderer?.zoom(factor: scale)
         }
     }
 }

@@ -227,3 +227,107 @@ fragment float4 pointCloudFragment(
     // `saturate` = clamp(x, 0, 1) : évite les valeurs hors-gamut.
     return float4(saturate(rgb), 1.0);
 }
+
+// --- STRUCTURES POUR L'ACCUMULATION DE NUAGE DE POINTS ---
+struct PackedPoint {
+    packed_float3 position;
+    packed_float3 color;
+};
+
+struct AccumulateUniforms {
+    float4x4 cameraTransform;
+    float4 depthIntrinsics;
+    uint2 depthSize;
+    float minDepth;
+    float maxDepth;
+};
+
+struct AccumulatedRenderUniforms {
+    float4x4 viewProjection;
+    float pointSize;
+};
+
+struct AccumulatedPointOut {
+    float4 position [[position]];
+    float3 color;
+    float pointSize [[point_size]];
+};
+
+// --- COMPUTE SHADER : DÉPROJECTION ET ACCUMULATION (ZERO-COPY) ---
+kernel void accumulatePointCloud(
+    texture2d<float, access::sample> depthTex [[texture(0)]],
+    texture2d<float, access::sample> yTex [[texture(1)]],
+    texture2d<float, access::sample> cbcrTex [[texture(2)]],
+    constant AccumulateUniforms& uniforms [[buffer(0)]],
+    device PackedPoint* outPoints [[buffer(1)]],
+    device atomic_uint* pointCount [[buffer(2)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= uniforms.depthSize.x || gid.y >= uniforms.depthSize.y) return;
+
+    // Échantillonnage sous-résolution (ex: un pixel sur 2) pour économiser la mémoire et l'affichage
+    if (gid.x % 2 != 0 || gid.y % 2 != 0) return;
+
+    constexpr sampler s(address::clamp_to_edge, filter::nearest);
+    float2 uv = (float2(gid) + 0.5) / float2(uniforms.depthSize);
+    float depth = depthTex.sample(s, uv).r;
+
+    // Filtre des points non valides
+    if (!isfinite(depth) || depth < uniforms.minDepth || depth > uniforms.maxDepth) return;
+
+    // Déprojection (Intrinsics -> Coordonnées locales Caméra)
+    float fx = uniforms.depthIntrinsics.x;
+    float fy = uniforms.depthIntrinsics.y;
+    float cx = uniforms.depthIntrinsics.z;
+    float cy = uniforms.depthIntrinsics.w;
+
+    float px = (float(gid.x) - cx) / fx * depth;
+    float py = -(float(gid.y) - cy) / fy * depth;
+    float pz = -depth;
+
+    float4 localPos = float4(px, py, pz, 1.0);
+    
+    // Transformation en coordonnées du monde (ARKit World Space)
+    float4 worldPos = uniforms.cameraTransform * localPos;
+
+    // Échantillonnage de la couleur YCbCr vers RGB
+    constexpr sampler sColor(address::clamp_to_edge, filter::linear);
+    float y = yTex.sample(sColor, uv).r;
+    float2 cbcr = cbcrTex.sample(sColor, uv).rg - float2(0.5, 0.5);
+
+    float3 rgb;
+    rgb.r = y + 1.402 * cbcr.y;
+    rgb.g = y - 0.344136 * cbcr.x - 0.714136 * cbcr.y;
+    rgb.b = y + 1.772 * cbcr.x;
+    rgb = saturate(rgb);
+
+    // Ajout thread-safe dans le buffer global (Limite stricte : 5 millions de points)
+    uint index = atomic_fetch_add_explicit(pointCount, 1, memory_order_relaxed);
+    if (index < 5000000) {
+        outPoints[index].position = packed_float3(worldPos.xyz);
+        outPoints[index].color = packed_float3(rgb);
+    }
+}
+
+// --- RENDU DU NUAGE DE POINTS ACCUMULÉ (3D MONDE) ---
+vertex AccumulatedPointOut accumulatedVertex(
+    uint vid [[vertex_id]],
+    device const PackedPoint* points [[buffer(0)]],
+    constant AccumulatedRenderUniforms& uniforms [[buffer(1)]]
+) {
+    PackedPoint pt = points[vid];
+    
+    AccumulatedPointOut out;
+    out.position = uniforms.viewProjection * float4(pt.position, 1.0);
+    out.color = pt.color;
+    out.pointSize = uniforms.pointSize;
+    return out;
+}
+
+fragment float4 accumulatedFragment(AccumulatedPointOut in [[stage_in]], float2 coord [[point_coord]]) {
+    float2 delta = coord - 0.5;
+    if (dot(delta, delta) > 0.25) {
+        discard_fragment();
+    }
+    return float4(in.color, 1.0);
+}
