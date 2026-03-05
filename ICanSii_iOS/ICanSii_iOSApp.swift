@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import ARKit
 
 @main
 struct ICanSii_iOSApp: App {
