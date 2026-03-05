@@ -27,7 +27,9 @@ struct PointCloudUniforms {
 
 struct PointOut {
     float4 position [[position]];
-    float depth;
+    // UV en espace paysage natif (landscape) pour aller chercher la couleur RGB
+    // dans la texture caméra ARKit. Même repère que le depth map (même FOV, même orientation).
+    float2 rgbUV;
     float pointSize [[point_size]];
 };
 
@@ -137,9 +139,15 @@ vertex PointOut pointCloudVertex(
     float depth = depthTex.sample(s, uv).r;
 
     PointOut out;
-    out.depth = depth;
+    // On mémorise l'UV paysage natif pour colorer ce point avec sa vraie couleur RGB.
+    // Les textures RGB (capturedImage) et depth partagent le même espace UV car
+    // elles proviennent du même capteur, même champ de vision, même orientation.
+    out.rgbUV = uv;
     out.pointSize = uniforms.pointSize;
 
+    // --- Rejet des points hors-plage ---
+    // Les points invalides (NaN, infini, trop proche ou trop loin) sont
+    // envoyés hors-écran en NDC (2, 2) → Metal les clippe et ne les dessine pas.
     if (!isfinite(depth) || depth < uniforms.minDepth || depth > uniforms.maxDepth) {
         out.position = float4(2.0, 2.0, 1.0, 1.0);
         return out;
@@ -174,25 +182,48 @@ vertex PointOut pointCloudVertex(
     float scale = 1.2;
     float2 ndc = float2(p2.x / (z * scale), p2.y / (z * scale));
 
-    out.position = float4(ndc, 0.0, 1.0);
+    // --- Correction d'orientation : paysage → portrait ---
+    // Le capteur LiDAR est nativement paysage (X = droite, Y = haut en paysage).
+    // L'iPhone est tenu en portrait → rotation 90° dans le sens CW en espace NDC :
+    //   portrait_ndc_x =  landscape_ndc_y   (le haut paysage = la droite portrait)
+    //   portrait_ndc_y = -landscape_ndc_x   (la droite paysage = le bas portrait)
+    // C'est la même rotation qu'implique le displayTransform dans les modes RGB/Depth.
+    out.position = float4(ndc.y, -ndc.x, 0.0, 1.0);
     return out;
 }
 
 fragment float4 pointCloudFragment(
     PointOut in [[stage_in]],
-    constant PointCloudUniforms& uniforms [[buffer(0)]],
+    // Plan Y  : luminance (niveau de gris), pleine résolution, 1 canal (r8)
+    texture2d<float, access::sample> yTex    [[texture(0)]],
+    // Plan CbCr : chrominance (couleur), demi-résolution, 2 canaux (rg8)
+    texture2d<float, access::sample> cbcrTex [[texture(1)]],
     float2 coord [[point_coord]]
 ) {
+    // --- Forme circulaire des points ---
+    // Par défaut, Metal dessine les points comme des carrés (quads).
+    // `point_coord` va de (0,0) à (1,1) sur ce carré.
+    // On rejette les fragments hors du cercle inscrit (rayon = 0.5) → disques propres.
     float2 delta = coord - 0.5;
     if (dot(delta, delta) > 0.25) {
         discard_fragment();
     }
 
-    if (!isfinite(in.depth) || in.depth < uniforms.minDepth || in.depth > uniforms.maxDepth) {
-        return float4(0.0);
-    }
+    // --- Échantillonnage de la couleur réelle du point ---
+    // L'image ARKit est en YCbCr bi-plan (format NV12/420v) :
+    //   Y    = luminance seule (noir/blanc)
+    //   CbCr = deux composantes de chrominance (couleur) à demi-résolution
+    // On soustrait 0.5 à CbCr pour centrer les valeurs autour de zéro (espace signé).
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    float  y    = yTex.sample(s, in.rgbUV).r;
+    float2 cbcr = cbcrTex.sample(s, in.rgbUV).rg - float2(0.5, 0.5);
 
-    float normalized = (in.depth - uniforms.minDepth) / max(uniforms.maxDepth - uniforms.minDepth, 1e-4);
-    float3 color = inferno(normalized);
-    return float4(color, 1.0);
+    // --- Conversion YCbCr → RGB (norme BT.601, coefficients standards iOS/ARKit) ---
+    float3 rgb;
+    rgb.r = y + 1.402    * cbcr.y;
+    rgb.g = y - 0.344136 * cbcr.x - 0.714136 * cbcr.y;
+    rgb.b = y + 1.772    * cbcr.x;
+
+    // `saturate` = clamp(x, 0, 1) : évite les valeurs hors-gamut.
+    return float4(saturate(rgb), 1.0);
 }

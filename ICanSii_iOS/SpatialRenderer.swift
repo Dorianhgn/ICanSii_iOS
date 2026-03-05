@@ -287,10 +287,34 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
             pitch: pitch
         )
 
+        // --- Création des textures couleur (YCbCr bi-plan) depuis l'image caméra ---
+        // ARKit fournit capturedImage en format YCbCr NV12/420v (deux plans séparés) :
+        //   Plan 0 → Y  (luminance, r8Unorm,  pleine résolution)
+        //   Plan 1 → CbCr (chrominance, rg8Unorm, demi-résolution)
+        // Ces textures partagent le même espace UV que le depth map : pas de remapping.
+        let rgbImage   = frame.capturedImage
+        let yWidth     = CVPixelBufferGetWidthOfPlane(rgbImage, 0)
+        let yHeight    = CVPixelBufferGetHeightOfPlane(rgbImage, 0)
+        let cbcrWidth  = CVPixelBufferGetWidthOfPlane(rgbImage, 1)
+        let cbcrHeight = CVPixelBufferGetHeightOfPlane(rgbImage, 1)
+
+        guard let yTexture = textureBridge.makeTexture(
+            from: rgbImage, pixelFormat: .r8Unorm,  planeIndex: 0,
+            width: yWidth,    height: yHeight
+        ),
+        let cbcrTexture = textureBridge.makeTexture(
+            from: rgbImage, pixelFormat: .rg8Unorm, planeIndex: 1,
+            width: cbcrWidth, height: cbcrHeight
+        ) else { return }
+
         encoder.setRenderPipelineState(pointPipeline)
+        // Vertex shader : depth map pour déprojeter chaque pixel en 3D
         encoder.setVertexTexture(depthTexture, index: 0)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<PointCloudUniforms>.stride, index: 0)
-        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<PointCloudUniforms>.stride, index: 0)
+        // Fragment shader : textures couleur (Y + CbCr) pour colorier chaque point
+        // Plus besoin d'envoyer les uniforms ici : la couleur vient des textures RGB.
+        encoder.setFragmentTexture(yTexture,    index: 0)
+        encoder.setFragmentTexture(cbcrTexture, index: 1)
         encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: depthWidth * depthHeight)
     }
 

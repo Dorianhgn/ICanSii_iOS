@@ -17,6 +17,20 @@ struct ContentView: View {
             if arManager.supportsSceneDepth {
                 SpatialMetalView(arManager: arManager, mode: mode, maxDistance: maxDistance)
                     .ignoresSafeArea()
+                    // --- Point rouge central (repère du centre de mesure) ---
+                    // Visible en mode RGB et Depth uniquement.
+                    // Ce point rouge correspond exactement au pixel central analysé
+                    // par `readCenterDepth` dans ARManager (utilisé dans "Distance centre").
+                    // `.allowsHitTesting(false)` : le cercle ne capte pas les gestes,
+                    // le panGestureRecognizer du point cloud reste actif sous-jacent.
+                    .overlay {
+                        if mode == .rgb || mode == .depth {
+                            Circle()
+                                .fill(Color.red)
+                                .frame(width: 12, height: 12)
+                                .allowsHitTesting(false)
+                        }
+                    }
             } else {
                 unsupportedView
             }
