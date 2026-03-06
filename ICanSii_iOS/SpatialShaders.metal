@@ -33,6 +33,21 @@ struct PointOut {
     float pointSize [[point_size]];
 };
 
+struct YoloDetectionMetal {
+    float minX, minY, maxX, maxY;
+    float coeffs[32];
+    float r, g, b, a; 
+};
+
+struct SegUniforms {
+    int count;
+    int show;
+    int isFloat16; 
+    int strideC; // Le saut mémoire pour changer de coefficient
+    int strideY; // Le saut mémoire pour changer de ligne (Y)
+    int strideX; // Le saut mémoire pour changer de pixel (X)
+};
+
 vertex FullscreenOut fullscreenVertex(
     uint id [[vertex_id]],
     constant DisplayUniforms& uniforms [[buffer(0)]]
@@ -73,13 +88,61 @@ vertex FullscreenOut fullscreenVertex(
     return out;
 }
 
+// --- FONCTION DE SEGMENTATION (Logique spatiale corrigée) ---
+inline float3 applySegmentation(
+    float2 portraitUV, // Coordonnée strictement en espace Portrait (YOLO)
+    float3 baseColor,
+    constant SegUniforms& segUniforms,
+    constant YoloDetectionMetal* detections,
+    device const void* prototypesRaw
+) {
+    if (segUniforms.show != 1 || segUniforms.count <= 0) return baseColor;
+
+    for (int d = 0; d < segUniforms.count; d++) {
+        YoloDetectionMetal det = detections[d];
+        
+        // 1. La Bounding Box et l'UV sont maintenant tous les deux en Portrait ! Plus de décalage.
+        if (portraitUV.x >= det.minX && portraitUV.x <= det.maxX && portraitUV.y >= det.minY && portraitUV.y <= det.maxY) {
+            
+            // 2. Projection directe sur la grille 160x160 (Plus besoin de bidouiller les axes)
+            int px = clamp(int(portraitUV.x * 160.0), 0, 159);
+            int py = clamp(int(portraitUV.y * 160.0), 0, 159);
+            
+            float maskVal = 0.0;
+            for (int c = 0; c < 32; c++) {
+                int index = c * segUniforms.strideC + py * segUniforms.strideY + px * segUniforms.strideX;
+                
+                float protoVal = 0.0;
+                if (segUniforms.isFloat16 == 1) {
+                    protoVal = float(((device const half*)prototypesRaw)[index]);
+                } else {
+                    protoVal = ((device const float*)prototypesRaw)[index];
+                }
+                    
+                maskVal += protoVal * det.coeffs[c];
+            }
+            
+            float sigmoid = 1.0 / (1.0 + exp(-maskVal));
+            
+            if (sigmoid > 0.5) {
+                float3 maskColor = float3(det.r, det.g, det.b);
+                return mix(baseColor, maskColor, 0.45); 
+            }
+        }
+    }
+    return baseColor;
+}
+
+// --- MISE À JOUR : RGB FRAGMENT ---
 fragment float4 rgbFragment(
     FullscreenOut in [[stage_in]],
     texture2d<float, access::sample> yTex [[texture(0)]],
-    texture2d<float, access::sample> cbcrTex [[texture(1)]]
+    texture2d<float, access::sample> cbcrTex [[texture(1)]],
+    constant SegUniforms& segUniforms [[buffer(0)]],
+    constant YoloDetectionMetal* detections [[buffer(1)]],
+    device const void* prototypes [[buffer(2)]] // <-- Pense bien à mettre void* ici aussi si ce n'était pas le cas
 ) {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
-
     float y = yTex.sample(s, in.uv).r;
     float2 cbcr = cbcrTex.sample(s, in.uv).rg - float2(0.5, 0.5);
 
@@ -87,8 +150,16 @@ fragment float4 rgbFragment(
     rgb.r = y + 1.402 * cbcr.y;
     rgb.g = y - 0.344136 * cbcr.x - 0.714136 * cbcr.y;
     rgb.b = y + 1.772 * cbcr.x;
+    
+    float3 finalColor = saturate(rgb);
+    
+    // MAGIE SPATIALE : in.uv est le capteur brut (Paysage).
+    // On le fait pivoter à 90° mathématiquement pour obtenir l'UV YOLO (Portrait).
+    float2 portraitUV = float2(1.0 - in.uv.y, in.uv.x);
+    
+    finalColor = applySegmentation(portraitUV, finalColor, segUniforms, detections, prototypes);
 
-    return float4(saturate(rgb), 1.0);
+    return float4(finalColor, 1.0);
 }
 
 float3 inferno(float t) {
@@ -192,40 +263,37 @@ vertex PointOut pointCloudVertex(
     return out;
 }
 
+// --- POINT CLOUD FRAGMENT ---
 fragment float4 pointCloudFragment(
     PointOut in [[stage_in]],
-    // Plan Y  : luminance (niveau de gris), pleine résolution, 1 canal (r8)
     texture2d<float, access::sample> yTex    [[texture(0)]],
-    // Plan CbCr : chrominance (couleur), demi-résolution, 2 canaux (rg8)
     texture2d<float, access::sample> cbcrTex [[texture(1)]],
+    constant SegUniforms& segUniforms [[buffer(0)]],
+    constant YoloDetectionMetal* detections [[buffer(1)]],
+    device const void* prototypes [[buffer(2)]], // <-- Pense bien à mettre void* ici aussi
     float2 coord [[point_coord]]
 ) {
-    // --- Forme circulaire des points ---
-    // Par défaut, Metal dessine les points comme des carrés (quads).
-    // `point_coord` va de (0,0) à (1,1) sur ce carré.
-    // On rejette les fragments hors du cercle inscrit (rayon = 0.5) → disques propres.
     float2 delta = coord - 0.5;
-    if (dot(delta, delta) > 0.25) {
-        discard_fragment();
-    }
+    if (dot(delta, delta) > 0.25) { discard_fragment(); }
 
-    // --- Échantillonnage de la couleur réelle du point ---
-    // L'image ARKit est en YCbCr bi-plan (format NV12/420v) :
-    //   Y    = luminance seule (noir/blanc)
-    //   CbCr = deux composantes de chrominance (couleur) à demi-résolution
-    // On soustrait 0.5 à CbCr pour centrer les valeurs autour de zéro (espace signé).
     constexpr sampler s(address::clamp_to_edge, filter::linear);
     float  y    = yTex.sample(s, in.rgbUV).r;
     float2 cbcr = cbcrTex.sample(s, in.rgbUV).rg - float2(0.5, 0.5);
 
-    // --- Conversion YCbCr → RGB (norme BT.601, coefficients standards iOS/ARKit) ---
     float3 rgb;
     rgb.r = y + 1.402    * cbcr.y;
     rgb.g = y - 0.344136 * cbcr.x - 0.714136 * cbcr.y;
     rgb.b = y + 1.772    * cbcr.x;
+    
+    float3 finalColor = saturate(rgb);
 
-    // `saturate` = clamp(x, 0, 1) : évite les valeurs hors-gamut.
-    return float4(saturate(rgb), 1.0);
+    // CORRECTION DÉFINITIVE : L'UV du Point Cloud n'est pas inversé comme celui de l'écran.
+    // La rotation correcte pour s'aligner sur YOLO dans cet espace 3D est :
+    float2 portraitUV = float2(in.rgbUV.y, 1.0 - in.rgbUV.x);
+    
+    finalColor = applySegmentation(portraitUV, finalColor, segUniforms, detections, prototypes);
+
+    return float4(finalColor, 1.0);
 }
 
 // --- STRUCTURES POUR L'ACCUMULATION DE NUAGE DE POINTS ---

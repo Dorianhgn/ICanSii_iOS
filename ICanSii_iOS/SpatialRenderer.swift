@@ -3,6 +3,7 @@ import Foundation
 import Metal
 import MetalKit
 import simd
+import CoreML
 
 // Utilitaires mathématiques SIMD pour générer nos matrices (sans passer par SceneKit)
 extension simd_float4x4 {
@@ -42,7 +43,6 @@ extension simd_float4x4 {
 }
 
 final class SpatialRenderer: NSObject, MTKViewDelegate {
-    // ... Garder les structures Uniforms existantes ...
     struct DepthUniforms { var minDepth: Float; var maxDepth: Float }
     struct DisplayUniforms { var transform: simd_float3x3 }
     struct PointCloudUniforms {
@@ -97,6 +97,11 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
     private var isRecording: Bool = false
     private var frameSkipCounter = 0
     private var cancellable: AnyCancellable?
+
+    // Variables pour la segmentation
+    var visionDetections: [YoloDetection] = []
+    var visionPrototypes: MLMultiArray?
+    var showSegmentation3D: Bool = true
 
     init?(arManager: ARManager, mtkView: MTKView) {
         guard let device = mtkView.device,
@@ -327,6 +332,68 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
         return DisplayUniforms(transform: transform)
     }
 
+    private func bindSegmentationData(to encoder: MTLRenderCommandEncoder) {
+        struct SegUniforms { var count: Int32; var show: Int32; var isFloat16: Int32; var strideC: Int32; var strideY: Int32; var strideX: Int32 }
+        struct YoloDetectionMetal {
+            var minX, minY, maxX, maxY: Float
+            var coeffs: (Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float, Float)
+            var r, g, b, a: Float
+        }
+        
+        if showSegmentation3D, let proto = visionPrototypes, !visionDetections.isEmpty {
+            let maxDetections = min(visionDetections.count, 10)
+            let isF16 = proto.dataType == .float16
+            
+            // --- LECTURE DES STRIDES ---
+            // On demande à CoreML comment il a rangé sa mémoire (pour contourner le padding)
+            let strideC = Int32(proto.strides[1].intValue)
+            let strideY = Int32(proto.strides[2].intValue)
+            let strideX = Int32(proto.strides[3].intValue)
+            
+            var segUniforms = SegUniforms(count: Int32(maxDetections), show: 1, isFloat16: isF16 ? 1 : 0, strideC: strideC, strideY: strideY, strideX: strideX)
+            
+            var detMetal = [YoloDetectionMetal]()
+            let colors: [SIMD3<Float>] = [SIMD3(1,0,0), SIMD3(0,1,0), SIMD3(0,0.5,1), SIMD3(1,0,1), SIMD3(1,1,0)]
+            
+            for (index, det) in visionDetections.prefix(maxDetections).enumerated() {
+                let rect = det.boundingBox
+                let c = det.maskCoefficients
+                let tupleCoeffs = (c[0],c[1],c[2],c[3],c[4],c[5],c[6],c[7],c[8],c[9],c[10],c[11],c[12],c[13],c[14],c[15],c[16],c[17],c[18],c[19],c[20],c[21],c[22],c[23],c[24],c[25],c[26],c[27],c[28],c[29],c[30],c[31])
+                let col = colors[index % colors.count]
+                
+                detMetal.append(YoloDetectionMetal(
+                    minX: Float(rect.minX), minY: Float(rect.minY), maxX: Float(rect.maxX), maxY: Float(rect.maxY),
+                    coeffs: tupleCoeffs,
+                    r: col.x, g: col.y, b: col.z, a: 1.0
+                ))
+            }
+            
+            // Calcul blindé de la taille du buffer (Prend en compte le padding potentiel)
+            let totalElements = proto.strides[0].intValue * proto.shape[0].intValue
+            let byteCount = totalElements * (isF16 ? 2 : 4)
+            
+            guard let protoBuffer = device.makeBuffer(bytes: proto.dataPointer, length: byteCount, options: .storageModeShared) else { return }
+            
+            encoder.setFragmentBytes(&segUniforms, length: MemoryLayout<SegUniforms>.stride, index: 0)
+            encoder.setFragmentBytes(&detMetal, length: MemoryLayout<YoloDetectionMetal>.stride * detMetal.count, index: 1)
+            encoder.setFragmentBuffer(protoBuffer, offset: 0, index: 2)
+            
+        } else {
+            // Uniforms vides
+            var emptyUniforms = SegUniforms(count: 0, show: 0, isFloat16: 0, strideC: 0, strideY: 0, strideX: 0)
+            encoder.setFragmentBytes(&emptyUniforms, length: MemoryLayout<SegUniforms>.stride, index: 0)
+            
+            // Detections vides
+            var dummyDet = YoloDetectionMetal(minX: 0, minY: 0, maxX: 0, maxY: 0, coeffs: (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0), r: 0, g: 0, b: 0, a: 0)
+            encoder.setFragmentBytes(&dummyDet, length: MemoryLayout<YoloDetectionMetal>.stride, index: 1)
+            
+            // LA CORRECTION : On crée un vrai MTLBuffer (minuscule) pour satisfaire l'espace mémoire 'device'
+            if let dummyBuffer = device.makeBuffer(length: 16, options: .storageModeShared) {
+                encoder.setFragmentBuffer(dummyBuffer, offset: 0, index: 2)
+            }
+        }
+    }
+
     private func renderRGB(frame: SpatialFrame, encoder: MTLRenderCommandEncoder, view: MTKView) {
         let image = frame.capturedImage
         guard let yTexture = textureBridge.makeTexture(from: image, pixelFormat: .r8Unorm, planeIndex: 0, width: CVPixelBufferGetWidthOfPlane(image, 0), height: CVPixelBufferGetHeightOfPlane(image, 0)),
@@ -336,6 +403,7 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<DisplayUniforms>.stride, index: 0)
         encoder.setFragmentTexture(yTexture, index: 0)
         encoder.setFragmentTexture(cbcrTexture, index: 1)
+        bindSegmentationData(to: encoder)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }
 
@@ -368,8 +436,12 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
         encoder.setRenderPipelineState(pointPipeline)
         encoder.setVertexTexture(depthTexture, index: 0)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<PointCloudUniforms>.stride, index: 0)
+        
         encoder.setFragmentTexture(yTexture, index: 0)
         encoder.setFragmentTexture(cbcrTexture, index: 1)
+        
+        bindSegmentationData(to: encoder)
+        
         encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: CVPixelBufferGetWidth(depthMap) * CVPixelBufferGetHeight(depthMap))
     }
 

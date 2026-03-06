@@ -15,12 +15,13 @@ struct ContentView: View {
     @State private var mode: SpatialDisplayMode = .rgb
     @State private var maxDistance: Float = 6.0
     @State private var isRecording: Bool = false
+    @State private var showSegmentation3D: Bool = true
 
     var body: some View {
         ZStack(alignment: .bottom) {
             ZStack(alignment: .top) {
                 if arManager.supportsSceneDepth {
-                    SpatialMetalView(arManager: arManager, mode: mode, maxDistance: maxDistance, isRecording: isRecording)
+                    SpatialMetalView(arManager: arManager, mode: mode, maxDistance: maxDistance, isRecording: isRecording, showSegmentation3D: showSegmentation3D, visionDetections: visionManager.detections, visionPrototypes: visionManager.currentPrototypes)
                         .ignoresSafeArea()
                         .overlay {
                             // Point central (visée)
@@ -44,6 +45,12 @@ struct ContentView: View {
                 VStack(spacing: 8) {
                     yoloHUD // Le HUD style "Appli YOLO" tout en haut
                     hud     // Ton HUD existant en dessous
+                    
+                    if mode == .pointCloud {
+                        Toggle("Masques 3D (YOLO)", isOn: $showSegmentation3D)
+                            .tint(.cyan)
+                            .padding(.vertical, 4)
+                    }
                 }
             }
             

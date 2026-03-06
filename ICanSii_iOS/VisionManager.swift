@@ -11,6 +11,8 @@ struct YoloDetection: Identifiable {
     let label: String
     let confidence: Float
     let boundingBox: CGRect // Coordonnées normalisées (0.0 à 1.0)
+    let classId: Int
+    let maskCoefficients: [Float] // Les 32 valeurs du masque
 }
 
 enum YoloModelType: String, CaseIterable, Identifiable {
@@ -36,6 +38,7 @@ final class VisionManager: ObservableObject {
     }
     
     @Published var detections: [YoloDetection] = []
+    @Published var currentPrototypes: MLMultiArray?
     @Published var fps: Double = 0.0
     @Published var inferenceTimeMs: Double = 0.0
     
@@ -120,75 +123,145 @@ final class VisionManager: ObservableObject {
     }
     
     private func processResults(for request: VNRequest, error: Error?) {
-        if let error = error {
-            print("Erreur Vision: \(error)")
-            return
-        }
-        
         guard let results = request.results as? [VNCoreMLFeatureValueObservation] else { return }
         
-        // On récupère le tenseur de détection [1, 300, 38]
+        // Récupère les boîtes (Tenseur 3D) et les Prototypes (Tenseur 4D)
         guard let boxFeature = results.first(where: { $0.featureValue.multiArrayValue?.shape.count == 3 }),
-              let boxArray = boxFeature.featureValue.multiArrayValue else { return }
+              let boxArray = boxFeature.featureValue.multiArrayValue,
+              let protoFeature = results.first(where: { $0.featureValue.multiArrayValue?.shape.count == 4 }),
+              let protoArray = protoFeature.featureValue.multiArrayValue else { return }
         
         let numDetections = boxArray.shape[1].intValue // 300
         let stride1 = boxArray.strides[1].intValue
         let stride2 = boxArray.strides[2].intValue
-        
-        // Pointeur Zéro-copie pour des performances maximales
         let pointer = boxArray.dataPointer.assumingMemoryBound(to: Float.self)
         
         var newDetections: [YoloDetection] = []
-        let modelInputSize: Float = 640.0 // Résolution interne de YOLO
+        let modelInputSize: Float = 640.0
         
         for i in 0..<numDetections {
-            // Index 4 : La confiance
             let conf = pointer[i * stride1 + 4 * stride2]
-            
-            // On ignore les "cases vides" du tableau (ou les détections faibles)
             if conf < 0.25 { continue }
             
-            // Index 5 : L'ID de la classe
             let classId = Int(pointer[i * stride1 + 5 * stride2])
             
-            // Index 0 à 3 : Les coordonnées (minX, minY, maxX, maxY)
+            // Extraction des 32 coefficients du masque (Index 6 à 37)
+            var coeffs: [Float] = []
+            for c in 0..<32 {
+                coeffs.append(pointer[i * stride1 + (6 + c) * stride2])
+            }
+            
             let minX = pointer[i * stride1 + 0 * stride2]
             let minY = pointer[i * stride1 + 1 * stride2]
             let maxX = pointer[i * stride1 + 2 * stride2]
             let maxY = pointer[i * stride1 + 3 * stride2]
             
-            // Normalisation pour SwiftUI (0.0 à 1.0)
-            let normMinX = minX / modelInputSize
-            let normMinY = minY / modelInputSize
-            let normMaxX = maxX / modelInputSize
-            let normMaxY = maxY / modelInputSize
-            
             let rect = CGRect(
-                x: CGFloat(normMinX),
-                y: CGFloat(normMinY),
-                width: CGFloat(normMaxX - normMinX),
-                height: CGFloat(normMaxY - normMinY)
+                x: CGFloat(minX / modelInputSize),
+                y: CGFloat(minY / modelInputSize),
+                width: CGFloat((maxX - minX) / modelInputSize),
+                height: CGFloat((maxY - minY) / modelInputSize)
             )
             
             let detection = YoloDetection(
                 label: getClassName(for: classId),
                 confidence: conf,
-                boundingBox: rect
+                boundingBox: rect,
+                classId: classId,
+                maskCoefficients: coeffs
             )
             newDetections.append(detection)
         }
         
         DispatchQueue.main.async {
+            self.currentPrototypes = protoArray
             self.detections = newDetections
         }
     }
     
     // Petit dictionnaire pour traduire l'ID de YOLO en texte lisible
-    // (J'ai mis les objets qu'on voit sur ta photo de bureau)
     private func getClassName(for id: Int) -> String {
         let cocoClasses = [
-            0: "Person", 39: "Bottle", 62: "TV", 63: "Laptop",
-            64: "Mouse", 65: "Remote", 66: "Keyboard", 67: "Cell Phone"
+            0: "person",
+            1: "bicycle",
+            2: "car",
+            3: "motorcycle",
+            4: "airplane",
+            5: "bus",
+            6: "train",
+            7: "truck",
+            8: "boat",
+            9: "traffic light",
+            10: "fire hydrant",
+            11: "stop sign",
+            12: "parking meter",
+            13: "bench",
+            14: "bird",
+            15: "cat",
+            16: "dog",
+            17: "horse",
+            18: "sheep",
+            19: "cow",
+            20: "elephant",
+            21: "bear",
+            22: "zebra",
+            23: "giraffe",
+            24: "backpack",
+            25: "umbrella",
+            26: "handbag",
+            27: "tie",
+            28: "suitcase",
+            29: "frisbee",
+            30: "skis",
+            31: "snowboard",
+            32: "sports ball",
+            33: "kite",
+            34: "baseball bat",
+            35: "baseball glove",
+            36: "skateboard",
+            37: "surfboard",
+            38: "tennis racket",
+            39: "bottle",
+            40: "wine glass",
+            41: "cup",
+            42: "fork",
+            43: "knife",
+            44: "spoon",
+            45: "bowl",
+            46: "banana",
+            47: "apple",
+            48: "sandwich",
+            49: "orange",
+            50: "brocolli",
+            51: "carrot",
+            52: "hot dog",
+            53: "pizza",
+            54: "donut",
+            55: "cake",
+            56: "chair",
+            57: "couch",
+            58: "potted plant",
+            59: "bed",
+            60: "dining table",
+            61: "toilet",
+            62: "tv",
+            63: "laptop",
+            64: "mouse",
+            65: "remote",
+            66: "keyboard",
+            67: "cell phone",
+            68: "microwave",
+            69: "oven",
+            70: "toaster",
+            71: "sink",
+            72: "refrigerator",
+            73: "book",
+            74: "clock",
+            75: "vase",
+            76: "scissors",
+            77: "teddy bear",
+            78: "hair drier",
+            79: "toothbrush"
         ]
         return cocoClasses[id] ?? "Obj \(id)"
     }

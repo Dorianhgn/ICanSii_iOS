@@ -1,11 +1,16 @@
 import MetalKit
 import SwiftUI
+import CoreML
 
 struct SpatialMetalView: UIViewRepresentable {
     @ObservedObject var arManager: ARManager
     var mode: SpatialDisplayMode
     var maxDistance: Float
     var isRecording: Bool
+    
+    var showSegmentation3D: Bool = true
+    var visionDetections: [YoloDetection] = []
+    var visionPrototypes: MLMultiArray?
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -50,6 +55,9 @@ struct SpatialMetalView: UIViewRepresentable {
         context.coordinator.renderer?.setMode(mode)
         context.coordinator.renderer?.setMaxDistance(maxDistance)
         context.coordinator.renderer?.setRecording(isRecording)
+        context.coordinator.renderer?.showSegmentation3D = showSegmentation3D
+        context.coordinator.renderer?.visionDetections = visionDetections
+        context.coordinator.renderer?.visionPrototypes = visionPrototypes
     }
 
     final class Coordinator: NSObject {
