@@ -45,12 +45,6 @@ struct ContentView: View {
                 VStack(spacing: 8) {
                     yoloHUD // Le HUD style "Appli YOLO" tout en haut
                     hud     // Ton HUD existant en dessous
-                    
-                    if mode == .pointCloud {
-                        Toggle("Masques 3D (YOLO)", isOn: $showSegmentation3D)
-                            .tint(.cyan)
-                            .padding(.vertical, 4)
-                    }
                 }
             }
             
@@ -140,7 +134,7 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
             
-            if mode != .pointCloud {
+            if mode == .rgb || mode == .depth {
                 VStack(spacing: 8) {
                     HStack {
                         Text("Portée")
@@ -156,6 +150,23 @@ struct ContentView: View {
                     Spacer()
                     Text(centerDistanceText).monospacedDigit()
                 }
+            }
+
+            if mode == .livePointCloud {
+                VStack(spacing: 8) {
+                    Text("Rotation Caméra")
+                        .font(.caption)
+                    Slider(value: Binding(
+                        get: { Double(arManager.liveOrbitAngle) },
+                        set: { arManager.liveOrbitAngle = Float($0) }
+                    ), in: -Double.pi...Double.pi)
+                }
+            }
+
+            if mode == .accumulatedPointCloud || mode == .livePointCloud {
+                Toggle("Masques 3D (YOLO)", isOn: $showSegmentation3D)
+                    .tint(.cyan)
+                    .padding(.vertical, 4)
             }
 
             HStack {
@@ -174,7 +185,8 @@ struct ContentView: View {
         Button(action: {
             withAnimation {
                 isRecording.toggle()
-                if !isRecording { mode = .pointCloud }
+                // Transition automatique vers le nuage cumule apres l'enregistrement
+                if !isRecording { mode = .accumulatedPointCloud }
             }
         }) {
             Circle()

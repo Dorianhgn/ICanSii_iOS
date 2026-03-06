@@ -40,15 +40,30 @@ extension simd_float4x4 {
             SIMD4<Float>(0, 0, 0, 1)
         )
     }
+
+    static func lookAt(eye: SIMD3<Float>, center: SIMD3<Float>, up: SIMD3<Float>) -> simd_float4x4 {
+        let z = normalize(eye - center)
+        let x = normalize(cross(up, z))
+        let y = cross(z, x)
+        return simd_float4x4(
+            SIMD4<Float>(x.x, y.x, z.x, 0),
+            SIMD4<Float>(x.y, y.y, z.y, 0),
+            SIMD4<Float>(x.z, y.z, z.z, 0),
+            SIMD4<Float>(-dot(x, eye), -dot(y, eye), -dot(z, eye), 1)
+        )
+    }
 }
 
 final class SpatialRenderer: NSObject, MTKViewDelegate {
     struct DepthUniforms { var minDepth: Float; var maxDepth: Float }
     struct DisplayUniforms { var transform: simd_float3x3 }
     struct PointCloudUniforms {
-        var depthIntrinsics: SIMD4<Float>; var depthSize: SIMD2<UInt32>
-        var minDepth: Float; var maxDepth: Float; var pointSize: Float
-        var yaw: Float; var pitch: Float
+        var viewProjection: simd_float4x4
+        var depthIntrinsics: SIMD4<Float>
+        var depthSize: SIMD2<UInt32>
+        var minDepth: Float
+        var maxDepth: Float
+        var pointSize: Float
     }
     
     // Nouvelles structures
@@ -97,6 +112,8 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
     private var isRecording: Bool = false
     private var frameSkipCounter = 0
     private var cancellable: AnyCancellable?
+    private weak var arManager: ARManager?
+    private var viewportSize: CGSize = CGSize(width: 1, height: 1)
 
     // Variables pour la segmentation
     var visionDetections: [YoloDetection] = []
@@ -112,6 +129,7 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
         self.device = device
         self.queue = queue
         self.textureBridge = textureBridge
+        self.arManager = arManager
 
         do {
             // Ajout de `useDepthStencil: true` ici 👇
@@ -207,6 +225,8 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
               let drawable = view.currentDrawable,
               let commandBuffer = queue.makeCommandBuffer() else { return }
 
+        viewportSize = view.bounds.size
+
         frameLock.lock()
         let frame = currentFrame
         let mode = self.mode
@@ -215,6 +235,7 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
         let currentPitch = self.pitch
         let curDist = self.cameraDistance
         let isRec = self.isRecording
+        let liveOrbitAngle = arManager?.liveOrbitAngle ?? 0
         frameLock.unlock()
 
         guard let frame else { return }
@@ -237,14 +258,14 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
             renderRGB(frame: frame, encoder: encoder, view: view)
         case .depth:
             renderDepth(frame: frame, encoder: encoder, view: view, maxDistance: maxDist)
-        case .pointCloud:
-            // S'il n'y a pas de buffer ou qu'on est au début, on affiche le direct, 
-            // sinon on affiche la reconstruction naviguable.
+        case .livePointCloud:
+            renderPointCloud(frame: frame, encoder: encoder, maxDistance: maxDist, orbitAngle: liveOrbitAngle)
+        case .accumulatedPointCloud:
             let count = getPointCount()
             if count > 0 && !isRec {
                 renderAccumulatedPointCloud(encoder: encoder, view: view, pointCount: count, yaw: currentYaw, pitch: currentPitch, distance: curDist)
             } else {
-                renderPointCloud(frame: frame, encoder: encoder, maxDistance: maxDist, yaw: currentYaw, pitch: currentPitch)
+                renderPointCloud(frame: frame, encoder: encoder, maxDistance: maxDist, orbitAngle: liveOrbitAngle)
             }
         }
 
@@ -419,30 +440,55 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }
 
-    private func renderPointCloud(frame: SpatialFrame, encoder: MTLRenderCommandEncoder, maxDistance: Float, yaw: Float, pitch: Float) {
+    private func renderPointCloud(frame: SpatialFrame, encoder: MTLRenderCommandEncoder, maxDistance: Float, orbitAngle: Float) {
         let depthMap = frame.depthMap
-        guard let depthTexture = textureBridge.makeTexture(from: depthMap, pixelFormat: .r32Float, planeIndex: 0, width: CVPixelBufferGetWidth(depthMap), height: CVPixelBufferGetHeight(depthMap)) else { return }
-        let sx = Float(CVPixelBufferGetWidth(depthMap)) / Float(max(frame.imageResolution.x, 1))
-        let sy = Float(CVPixelBufferGetHeight(depthMap)) / Float(max(frame.imageResolution.y, 1))
-        let intrinsics = frame.intrinsics
-        var uniforms = PointCloudUniforms(
-            depthIntrinsics: SIMD4<Float>(intrinsics.columns.0.x * sx, intrinsics.columns.1.y * sy, intrinsics.columns.2.x * sx, intrinsics.columns.2.y * sy),
-            depthSize: SIMD2<UInt32>(UInt32(CVPixelBufferGetWidth(depthMap)), UInt32(CVPixelBufferGetHeight(depthMap))),
-            minDepth: 0.1, maxDepth: maxDistance, pointSize: 2.0, yaw: yaw, pitch: pitch
+        let depthWidth = CVPixelBufferGetWidth(depthMap)
+        let depthHeight = CVPixelBufferGetHeight(depthMap)
+
+        guard let depthTexture = textureBridge.makeTexture(from: depthMap, pixelFormat: .r32Float, planeIndex: 0, width: depthWidth, height: depthHeight) else { return }
+
+        // Camera orbitale ajustee pour la vue directe.
+        let aspect = Float(max(viewportSize.width, 1.0) / max(viewportSize.height, 1.0))
+        let projection = simd_float4x4.perspective(fovy: .pi / 3, aspect: aspect, near: 0.05, far: 50.0)
+
+        let targetCenter = SIMD3<Float>(0, -0.5, -2.0)
+        let cameraRadius: Float = 3.5
+        let cameraHeight: Float = 1.0
+
+        let eyePosition = SIMD3<Float>(
+            targetCenter.x + sin(orbitAngle) * cameraRadius,
+            targetCenter.y + cameraHeight,
+            targetCenter.z + cos(orbitAngle) * cameraRadius
         )
+        let viewMatrix = simd_float4x4.lookAt(eye: eyePosition, center: targetCenter, up: SIMD3<Float>(0, 1, 0))
+
+        let sx = Float(depthWidth) / Float(max(frame.imageResolution.x, 1))
+        let sy = Float(depthHeight) / Float(max(frame.imageResolution.y, 1))
+        let intrinsics = frame.intrinsics
+
+        var uniforms = PointCloudUniforms(
+            viewProjection: projection * viewMatrix,
+            depthIntrinsics: SIMD4<Float>(intrinsics.columns.0.x * sx, intrinsics.columns.1.y * sy, intrinsics.columns.2.x * sx, intrinsics.columns.2.y * sy),
+            depthSize: SIMD2<UInt32>(UInt32(depthWidth), UInt32(depthHeight)),
+            minDepth: 0.1,
+            maxDepth: maxDistance,
+            pointSize: 2.0
+        )
+
         let rgbImage = frame.capturedImage
         guard let yTexture = textureBridge.makeTexture(from: rgbImage, pixelFormat: .r8Unorm, planeIndex: 0, width: CVPixelBufferGetWidthOfPlane(rgbImage, 0), height: CVPixelBufferGetHeightOfPlane(rgbImage, 0)),
               let cbcrTexture = textureBridge.makeTexture(from: rgbImage, pixelFormat: .rg8Unorm, planeIndex: 1, width: CVPixelBufferGetWidthOfPlane(rgbImage, 1), height: CVPixelBufferGetHeightOfPlane(rgbImage, 1)) else { return }
+
         encoder.setRenderPipelineState(pointPipeline)
         encoder.setVertexTexture(depthTexture, index: 0)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<PointCloudUniforms>.stride, index: 0)
-        
+
         encoder.setFragmentTexture(yTexture, index: 0)
         encoder.setFragmentTexture(cbcrTexture, index: 1)
-        
+
         bindSegmentationData(to: encoder)
-        
-        encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: CVPixelBufferGetWidth(depthMap) * CVPixelBufferGetHeight(depthMap))
+
+        encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: depthWidth * depthHeight)
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}

@@ -11,6 +11,7 @@ final class ARManager: NSObject, ObservableObject {
     @Published private(set) var centerDistanceMeters: Float?
     @Published private(set) var trackingStateText = "Not running"
     @Published private(set) var supportsSceneDepth = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
+    @Published var liveOrbitAngle: Float = 0.0
 
     private let session = ARSession()
     private let processingQueue = DispatchQueue(label: "sii.arkit.processing", qos: .userInteractive)
