@@ -128,7 +128,8 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
         super.init()
 
         cancellable = arManager.framePublisher
-            .receive(on: DispatchQueue.global(qos: .userInteractive))
+            // .receive(on: DispatchQueue.global(qos: .userInteractive))
+            // On enlève le .receive(on: ...) qui cause la fuite de RAM !
             .sink { [weak self] frame in
                 guard let self else { return }
                 self.frameLock.lock()
