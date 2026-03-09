@@ -95,21 +95,21 @@ struct ContentView: View {
         GeometryReader { geometry in
             ForEach(visionManager.detections) { detection in
                 
-                let rect = detection.boundingBox
+                // MAGIE : On convertit la boîte 4:3 de YOLO vers la boîte croppée de l'écran 19.5:9
+                let screenUVRect = detection.boundingBox.transformedToScreen(using: arManager.displayTransform)
+                
                 let convertedRect = CGRect(
-                    x: rect.minX * geometry.size.width,
-                    y: rect.minY * geometry.size.height, // <--- CHANGÉ ICI : Plus de (1.0 - rect.maxY)
-                    width: rect.width * geometry.size.width,
-                    height: rect.height * geometry.size.height
+                    x: screenUVRect.minX * geometry.size.width,
+                    y: screenUVRect.minY * geometry.size.height, 
+                    width: screenUVRect.width * geometry.size.width,
+                    height: screenUVRect.height * geometry.size.height
                 )
                 
                 ZStack(alignment: .topLeading) {
-                    // La boîte
                     Rectangle()
                         .path(in: convertedRect)
                         .stroke(Color.cyan, lineWidth: 2)
                     
-                    // Le label et la confiance
                     Text(String(format: "%@ %.0f%%", detection.label, detection.confidence * 100))
                         .font(.caption2)
                         .fontWeight(.bold)
@@ -199,12 +199,39 @@ struct ContentView: View {
     }
 
     private var unsupportedView: some View {
-        // Reste inchangé...
         Color.black
     }
 
     private var centerDistanceText: String {
         guard let d = arManager.centerDistanceMeters else { return "--" }
         return String(format: "%.2f m", d)
+    }
+}
+
+// Formule mathématique pour annuler le recadrage (Crop) et aligner YOLO avec l'écran
+extension CGRect {
+    func transformedToScreen(using displayTransform: CGAffineTransform) -> CGRect {
+        let inverted = displayTransform.inverted()
+        let corners = [
+            CGPoint(x: minX, y: minY), CGPoint(x: maxX, y: minY),
+            CGPoint(x: minX, y: maxY), CGPoint(x: maxX, y: maxY)
+        ]
+        
+        var minSx: CGFloat = 10000, minSy: CGFloat = 10000
+        var maxSx: CGFloat = -10000, maxSy: CGFloat = -10000
+        
+        for corner in corners {
+            // Conversion Portrait (YOLO) -> Paysage (Capteur)
+            let tx = 1.0 - corner.y
+            let ty = corner.x
+            // Application de la matrice inversée d'ARKit
+            let screenUV = CGPoint(x: tx, y: ty).applying(inverted)
+            
+            minSx = min(minSx, screenUV.x)
+            minSy = min(minSy, screenUV.y)
+            maxSx = max(maxSx, screenUV.x)
+            maxSy = max(maxSy, screenUV.y)
+        }
+        return CGRect(x: minSx, y: minSy, width: maxSx - minSx, height: maxSy - minSy)
     }
 }

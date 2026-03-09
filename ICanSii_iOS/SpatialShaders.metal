@@ -4,7 +4,6 @@ using namespace metal;
 struct FullscreenOut {
     float4 position [[position]];
     float2 uv;
-    float2 rawUV;
 };
 
 struct DepthUniforms {
@@ -27,27 +26,28 @@ struct PointCloudUniforms {
 
 struct PointOut {
     float4 position [[position]];
-    float2 rawUV;
+    float2 rgbUV; 
     float pointSize [[point_size]];
 };
 
 struct YoloDetectionMetal {
     float minX, minY, maxX, maxY;
     float coeffs[32];
-    float r, g, b, a;
+    float r, g, b, a; 
 };
 
 struct SegUniforms {
     int count;
     int show;
-    int isFloat16;
-    int strideC;
-    int strideY;
-    int strideX;
+    int isFloat16; 
+    int strideC; 
+    int strideY; 
+    int strideX; 
 };
 
+// --- FONCTION DE SEGMENTATION (DÉFINITIVE) ---
 inline float3 applySegmentation(
-    float2 rawUV,
+    float2 yoloUV, // <- On lui passe directement l'UV converti
     float3 baseColor,
     constant SegUniforms& segUniforms,
     constant YoloDetectionMetal* detections,
@@ -55,31 +55,30 @@ inline float3 applySegmentation(
 ) {
     if (segUniforms.show != 1 || segUniforms.count <= 0) return baseColor;
 
-    float2 portraitUV = float2(1.0 - rawUV.y, rawUV.x);
-
     for (int d = 0; d < segUniforms.count; d++) {
         YoloDetectionMetal det = detections[d];
-
-        if (portraitUV.x >= det.minX && portraitUV.x <= det.maxX && portraitUV.y >= det.minY && portraitUV.y <= det.maxY) {
-            int px = clamp(int(portraitUV.x * 160.0), 0, 159);
-            int py = clamp(int(portraitUV.y * 160.0), 0, 159);
-
+        
+        if (yoloUV.x >= det.minX && yoloUV.x <= det.maxX && yoloUV.y >= det.minY && yoloUV.y <= det.maxY) {
+            
+            int px = clamp(int(yoloUV.x * 160.0), 0, 159);
+            int py = clamp(int(yoloUV.y * 160.0), 0, 159);
+            
             float maskVal = 0.0;
             for (int c = 0; c < 32; c++) {
                 int index = c * segUniforms.strideC + py * segUniforms.strideY + px * segUniforms.strideX;
-
-                float protoVal = segUniforms.isFloat16 == 1 ?
-                    float(((device const half*)prototypesRaw)[index]) :
+                
+                float protoVal = segUniforms.isFloat16 == 1 ? 
+                    float(((device const half*)prototypesRaw)[index]) : 
                     ((device const float*)prototypesRaw)[index];
-
+                    
                 maskVal += protoVal * det.coeffs[c];
             }
-
+            
             float sigmoid = 1.0 / (1.0 + exp(-maskVal));
-
+            
             if (sigmoid > 0.5) {
                 float3 maskColor = float3(det.r, det.g, det.b);
-                return mix(baseColor, maskColor, 0.45);
+                return mix(baseColor, maskColor, 0.45); 
             }
         }
     }
@@ -99,8 +98,7 @@ vertex FullscreenOut fullscreenVertex(
 
     FullscreenOut out;
     out.position = float4(positions[id], 0.0, 1.0);
-    out.rawUV = uvs[id];
-
+    
     float3 uv = float3(uvs[id], 1.0);
     float2 transformedUV = (uniforms.transform * uv).xy;
     out.uv = float2(1.0 - transformedUV.x, 1.0 - transformedUV.y);
@@ -113,7 +111,7 @@ fragment float4 rgbFragment(
     texture2d<float, access::sample> cbcrTex [[texture(1)]],
     constant SegUniforms& segUniforms [[buffer(0)]],
     constant YoloDetectionMetal* detections [[buffer(1)]],
-    device const void* prototypes [[buffer(2)]]
+    device const void* prototypes [[buffer(2)]] 
 ) {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
     float y = yTex.sample(s, in.uv).r;
@@ -123,9 +121,13 @@ fragment float4 rgbFragment(
     rgb.r = y + 1.402 * cbcr.y;
     rgb.g = y - 0.344136 * cbcr.x - 0.714136 * cbcr.y;
     rgb.b = y + 1.772 * cbcr.x;
-
+    
     float3 finalColor = saturate(rgb);
-    finalColor = applySegmentation(in.rawUV, finalColor, segUniforms, detections, prototypes);
+    
+    // MAGIE : On reconstruit l'UV de YOLO en appliquant une rotation de 90° à la mémoire brute
+    float2 yoloUV = float2(1.0 - in.uv.y, in.uv.x);
+    
+    finalColor = applySegmentation(yoloUV, finalColor, segUniforms, detections, prototypes);
 
     return float4(finalColor, 1.0);
 }
@@ -162,7 +164,7 @@ vertex PointOut pointCloudVertex(
     float depth = depthTex.sample(s, uv).r;
 
     PointOut out;
-    out.rawUV = uv;
+    out.rgbUV = uv;
     out.pointSize = uniforms.pointSize;
 
     if (!isfinite(depth) || depth < uniforms.minDepth || depth > uniforms.maxDepth) {
@@ -192,8 +194,8 @@ fragment float4 pointCloudFragment(
     if (dot(delta, delta) > 0.25) { discard_fragment(); }
 
     constexpr sampler s(address::clamp_to_edge, filter::linear);
-    float  y    = yTex.sample(s, in.rawUV).r;
-    float2 cbcr = cbcrTex.sample(s, in.rawUV).rg - float2(0.5, 0.5);
+    float  y    = yTex.sample(s, in.rgbUV).r;
+    float2 cbcr = cbcrTex.sample(s, in.rgbUV).rg - float2(0.5, 0.5);
 
     float3 rgb;
     rgb.r = y + 1.402    * cbcr.y;
@@ -201,7 +203,10 @@ fragment float4 pointCloudFragment(
     rgb.b = y + 1.772    * cbcr.x;
     float3 finalColor = saturate(rgb);
 
-    finalColor = applySegmentation(in.rawUV, finalColor, segUniforms, detections, prototypes);
+    // MÊME MAGIE : Rotation de l'UV brute du capteur vers YOLO
+    float2 yoloUV = float2(1.0 - in.rgbUV.y, in.rgbUV.x);
+    
+    finalColor = applySegmentation(yoloUV, finalColor, segUniforms, detections, prototypes);
 
     return float4(finalColor, 1.0);
 }
