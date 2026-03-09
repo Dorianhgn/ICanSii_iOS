@@ -15,7 +15,8 @@ struct SpatialFrame {
 enum SpatialDisplayMode: String, CaseIterable, Identifiable {
     case rgb = "RGB"
     case depth = "Depth"
-    case pointCloud = "PointCloud"
+    case livePointCloud = "PC Direct"
+    case accumulatedPointCloud = "PC Cumulé"
 
     var id: String { rawValue }
 }

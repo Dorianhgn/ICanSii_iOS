@@ -11,6 +11,8 @@ final class ARManager: NSObject, ObservableObject {
     @Published private(set) var centerDistanceMeters: Float?
     @Published private(set) var trackingStateText = "Not running"
     @Published private(set) var supportsSceneDepth = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
+    @Published var liveOrbitAngle: Float = 0.0
+    var displayTransform: CGAffineTransform = .identity
 
     private let session = ARSession()
     private let processingQueue = DispatchQueue(label: "sii.arkit.processing", qos: .userInteractive)
@@ -164,6 +166,8 @@ extension ARManager: ARSessionDelegate {
         }
         
         let displayTransform = frame.displayTransform(for: .portrait, viewportSize: viewportSize)
+
+        self.displayTransform = displayTransform
 
         // Création de notre objet "SpatialFrame" intermédiaire. Cet objet va encapsuler 
         // la photo (couleur), la matrice de profondeur, et les infos spatiales.
