@@ -7,6 +7,7 @@ struct SpatialMetalView: UIViewRepresentable {
     var mode: SpatialDisplayMode
     var maxDistance: Float
     var isRecording: Bool
+    var showTriplanes: Bool = false
     
     var showSegmentation3D: Bool = true
     var visionDetections: [YoloDetection] = []
@@ -34,6 +35,7 @@ struct SpatialMetalView: UIViewRepresentable {
         context.coordinator.renderer?.setMode(mode)
         context.coordinator.renderer?.setMaxDistance(maxDistance)
         context.coordinator.renderer?.setRecording(isRecording)
+        context.coordinator.renderer?.setShowTriplanes(showTriplanes)
 
         let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan(_:)))
         view.addGestureRecognizer(pan)
@@ -55,6 +57,7 @@ struct SpatialMetalView: UIViewRepresentable {
         context.coordinator.renderer?.setMode(mode)
         context.coordinator.renderer?.setMaxDistance(maxDistance)
         context.coordinator.renderer?.setRecording(isRecording)
+        context.coordinator.renderer?.setShowTriplanes(showTriplanes)
         context.coordinator.renderer?.showSegmentation3D = showSegmentation3D
         context.coordinator.renderer?.visionDetections = visionDetections
         context.coordinator.renderer?.visionPrototypes = visionPrototypes

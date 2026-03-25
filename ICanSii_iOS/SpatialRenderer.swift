@@ -80,6 +80,11 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
         var pointSize: Float
     }
 
+    struct DebugScalarUniforms {
+        var minValue: Float
+        var maxValue: Float
+    }
+
     private let device: MTLDevice
     private let queue: MTLCommandQueue
     private let textureBridge: MetalTextureBridge
@@ -97,6 +102,11 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
     private let maxPoints = 5_000_000
     private var pointBuffer: MTLBuffer?
     private var pointCountBuffer: MTLBuffer?
+    private let triplaneRes = 128
+    private let triplaneExtent: Float = 4.0
+    private var triplaneEncoder: TriplaneEncoder?
+    private var triplaneDebugPipeline: MTLRenderPipelineState
+    private var triplaneTextures: (xy: MTLTexture, yz: MTLTexture, zx: MTLTexture)?
 
     private var currentFrame: SpatialFrame?
     private var mode: SpatialDisplayMode = .rgb
@@ -119,6 +129,7 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
     var visionDetections: [YoloDetection] = []
     var visionPrototypes: MLMultiArray?
     var showSegmentation3D: Bool = true
+    var showTriplanes: Bool = false
 
     init?(arManager: ARManager, mtkView: MTKView) {
         guard let device = mtkView.device,
@@ -142,6 +153,10 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
             accumulateComputePipeline = try device.makeComputePipelineState(function: computeFunction)
             
             accumulatedRenderPipeline = try SpatialRenderer.makePipeline(device: device, library: library, vertexFunction: "accumulatedVertex", fragmentFunction: "accumulatedFragment", colorFormat: mtkView.colorPixelFormat, useDepthStencil: true)
+            // Keep depth format aligned with the active MTKView render pass.
+            // This avoids debug-layer aborts when switching pipelines in one pass.
+            triplaneDebugPipeline = try SpatialRenderer.makePipeline(device: device, library: library, vertexFunction: "debugQuadVertex", fragmentFunction: "debugScalarFragment", colorFormat: mtkView.colorPixelFormat, useDepthStencil: true)
+            triplaneEncoder = TriplaneEncoder(device: device, library: library, resolution: triplaneRes, extent: triplaneExtent)
             
             // On s'assure que la vue gère le format de profondeur pour que le point cloud 3D s'affiche bien
             mtkView.depthStencilPixelFormat = .depth32Float
@@ -191,6 +206,12 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
         isRecording = recording
     }
 
+    func setShowTriplanes(_ enabled: Bool) {
+        frameLock.lock()
+        showTriplanes = enabled
+        frameLock.unlock()
+    }
+
     // CORRECTION DE L'INVERSION DES GESTES ICI !
     func rotate(deltaX: Float, deltaY: Float) {
         frameLock.lock()
@@ -235,6 +256,7 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
         let currentPitch = self.pitch
         let curDist = self.cameraDistance
         let isRec = self.isRecording
+        let showTriplanes = self.showTriplanes
         let liveOrbitAngle = arManager?.liveOrbitAngle ?? 0
         frameLock.unlock()
 
@@ -247,6 +269,29 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
             if frameSkipCounter % 3 == 0, let computeEncoder = commandBuffer.makeComputeCommandEncoder() {
                 dispatchAccumulation(frame: frame, encoder: computeEncoder)
                 computeEncoder.endEncoding()
+            }
+        }
+
+        if showTriplanes,
+           let pointBuffer,
+           let triplaneEncoder {
+            let pointCount = getPointCount()
+            if pointCount > 0 {
+                triplaneTextures = triplaneEncoder.encode(
+                    points: pointBuffer,
+                    count: pointCount,
+                    commandBuffer: commandBuffer
+                )
+                // GPU timestamps are asynchronous and measured when the command
+                // buffer completes. This is true GPU time (not CPU dispatch time).
+                commandBuffer.addCompletedHandler { cb in
+                    let start = cb.gpuStartTime
+                    let end = cb.gpuEndTime
+                    if end > start {
+                        let dtMs = (end - start) * 1000.0
+                        print(String(format: "[Triplane] GPU %.3f ms (%d pts)", dtMs, pointCount))
+                    }
+                }
             }
         }
 
@@ -267,6 +312,10 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
             } else {
                 renderPointCloud(frame: frame, encoder: encoder, maxDistance: maxDist, orbitAngle: liveOrbitAngle)
             }
+        }
+
+        if showTriplanes, let triplaneTextures {
+            renderTriplaneOverlay(encoder: encoder, view: view, textures: triplaneTextures)
         }
 
         encoder.endEncoding()
@@ -340,6 +389,48 @@ final class SpatialRenderer: NSObject, MTKViewDelegate {
         encoder.setVertexBuffer(pointBuffer, offset: 0, index: 0)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<AccumulatedRenderUniforms>.stride, index: 1)
         encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: pointCount)
+    }
+
+    private func renderTriplaneOverlay(
+        encoder: MTLRenderCommandEncoder,
+        view: MTKView,
+        textures: (xy: MTLTexture, yz: MTLTexture, zx: MTLTexture)
+    ) {
+        let side = Double(triplaneRes)
+        let padding = 12.0
+        let drawableW = Double(view.drawableSize.width)
+        let drawableH = Double(view.drawableSize.height)
+
+        guard drawableW > 0, drawableH > 0 else { return }
+
+        let baseY = max(0.0, drawableH - side - padding)
+        let half = triplaneExtent * 0.5
+        var scalarUniforms = DebugScalarUniforms(minValue: -half, maxValue: half)
+
+        encoder.setRenderPipelineState(triplaneDebugPipeline)
+
+        // ARKit world frame: Y up.
+        // top = ZX (value Y), front = XY (value Z), side = YZ (value X min).
+        // Overlay order is chosen for quick visual inspection in that semantic order.
+        let ordered: [MTLTexture] = [textures.zx, textures.xy, textures.yz]
+        for (idx, tex) in ordered.enumerated() {
+            let x = padding + Double(idx) * (side + padding)
+            if x + side > drawableW { break }
+
+            encoder.setViewport(
+                MTLViewport(
+                    originX: x,
+                    originY: baseY,
+                    width: side,
+                    height: side,
+                    znear: 0.0,
+                    zfar: 1.0
+                )
+            )
+            encoder.setFragmentTexture(tex, index: 0)
+            encoder.setFragmentBytes(&scalarUniforms, length: MemoryLayout<DebugScalarUniforms>.stride, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
     }
 
     // Garder les méthodes de rendu originales intactes

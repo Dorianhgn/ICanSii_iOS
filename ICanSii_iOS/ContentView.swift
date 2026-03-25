@@ -9,6 +9,7 @@ struct ContentView: View {
     @State private var maxDistance: Float = 6.0
     @State private var isRecording: Bool = false
     @State private var showSegmentation3D: Bool = true
+    @State private var showTriplanes: Bool = false
     
     // NOUVEAU : États pour contrôler l'ouverture des bulles
     @State private var showYoloPanel: Bool = false
@@ -25,6 +26,7 @@ struct ContentView: View {
                         mode: mode,
                         maxDistance: maxDistance,
                         isRecording: isRecording,
+                        showTriplanes: showTriplanes,
                         showSegmentation3D: showSegmentation3D,
                         visionDetections: visionManager.detections,
                         visionPrototypes: visionManager.currentPrototypes
@@ -136,6 +138,9 @@ struct ContentView: View {
                 Toggle("Masques 3D (YOLO)", isOn: $showSegmentation3D)
                     .tint(.cyan)
                     .padding(.vertical, 4)
+
+                Toggle("Overlay Tri-planes", isOn: $showTriplanes)
+                    .tint(.orange)
             }
 
             HStack {
