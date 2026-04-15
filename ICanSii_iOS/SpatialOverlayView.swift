@@ -48,10 +48,7 @@ struct SpatialOverlayView: View {
     }
 
     private func uvToScreen(_ uv: CGPoint, displayTransform: CGAffineTransform) -> CGPoint {
-        let inverted = displayTransform.inverted()
-        let tx = 1.0 - uv.y
-        let ty = uv.x
-        return CGPoint(x: tx, y: ty).applying(inverted)
+        return uv.applying(displayTransform.inverted())
     }
 
     @ViewBuilder

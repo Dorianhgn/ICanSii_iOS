@@ -9,9 +9,12 @@ struct VestCell: Identifiable, Hashable {
 
     let id: String
     let isBack: Bool
-    let side: Side
     let column: Int
     let row: Int
+
+    var side: Side {
+        column == 0 ? .left : .right
+    }
 }
 
 struct VestActivationState: Equatable {
@@ -35,29 +38,27 @@ final class PreviewTransport: HapticTransport, ObservableObject {
 }
 
 enum VestLayout {
-    static let rowsPerSide = 5
-    static let colsPerSide = 2
+    static let rowsPerFace = 5
+    static let colsPerFace = 2
+
+    static func cellID(isBack: Bool, row: Int, column: Int) -> String {
+        "\(isBack ? "B" : "F")_r\(row)c\(column)"
+    }
 
     static let all: [VestCell] = {
         var out: [VestCell] = []
 
         for isBack in [false, true] {
-            for side in [VestCell.Side.left, .right] {
-                for row in 0..<rowsPerSide {
-                    for col in 0..<colsPerSide {
-                        let sideChar = side == .left ? "L" : "R"
-                        let layer = isBack ? "B" : "F"
-                        let id = "\(layer)_\(sideChar)_r\(row)c\(col)"
-                        out.append(
-                            VestCell(
-                                id: id,
-                                isBack: isBack,
-                                side: side,
-                                column: col,
-                                row: row
-                            )
+            for row in 0..<rowsPerFace {
+                for col in 0..<colsPerFace {
+                    out.append(
+                        VestCell(
+                            id: cellID(isBack: isBack, row: row, column: col),
+                            isBack: isBack,
+                            column: col,
+                            row: row
                         )
-                    }
+                    )
                 }
             }
         }

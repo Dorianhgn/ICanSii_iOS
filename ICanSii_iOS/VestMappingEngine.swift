@@ -3,7 +3,7 @@ import simd
 
 final class VestMappingEngine {
     struct Params {
-        var distanceThreshold: Float = 1.25
+        var distanceThreshold: Float = 4.0
         var intensityMin: Float = 0
         var intensityMax: Float = 1
         var directionDeadzone: Float = 0.12
@@ -82,7 +82,7 @@ final class VestMappingEngine {
         var cells: [String: Float] = [:]
 
         let normalizedY = max(-1, min(1, target.position.y))
-        let centerRowFloat = ((1 - normalizedY) * Float(VestLayout.rowsPerSide - 1)) / 2.0
+        let centerRowFloat = ((1 - normalizedY) * Float(VestLayout.rowsPerFace - 1)) / 2.0
 
         for cell in VestLayout.all where cell.isBack == isBack {
             let sideIntensity: Float
@@ -97,10 +97,7 @@ final class VestMappingEngine {
             let dr = Float(cell.row) - centerRowFloat
             let sigma: Float = 1.1
             let gaussian = expf(-0.5 * (dr * dr) / (sigma * sigma))
-
-            // Outer column gets slightly more emphasis to improve visibility in preview.
-            let colWeight: Float = cell.column == 1 ? 1.0 : 0.9
-            let value = max(0, min(1, sideIntensity * gaussian * colWeight))
+            let value = max(0, min(1, sideIntensity * gaussian))
 
             if value > 1e-4 {
                 cells[cell.id] = value

@@ -23,9 +23,25 @@ final class VestMappingEngineTests: XCTestCase {
 
     func testAllOffBeyondThreshold() {
         let engine = VestMappingEngine()
-        let state = engine.map(objects: [obj(x: 0, y: 0, z: -2.0)], timestamp: 0)
+        let state = engine.map(objects: [obj(x: 0, y: 0, z: -5.0)], timestamp: 0)
 
         XCTAssertTrue(VestLayout.all.allSatisfy { (state.cells[$0.id] ?? 0) == 0 })
+    }
+
+    func testLayoutIsTwoByFivePerFaceOnly() {
+        XCTAssertEqual(VestLayout.all.count, 20)
+
+        let front = VestLayout.all.filter { !$0.isBack }
+        let back = VestLayout.all.filter { $0.isBack }
+        XCTAssertEqual(front.count, 10)
+        XCTAssertEqual(back.count, 10)
+
+        for row in 0..<VestLayout.rowsPerFace {
+            let frontCols = Set(front.filter { $0.row == row }.map { $0.column })
+            let backCols = Set(back.filter { $0.row == row }.map { $0.column })
+            XCTAssertEqual(frontCols, Set(0..<VestLayout.colsPerFace))
+            XCTAssertEqual(backCols, Set(0..<VestLayout.colsPerFace))
+        }
     }
 
     func testCloserObjectYieldsHigherIntensity() {

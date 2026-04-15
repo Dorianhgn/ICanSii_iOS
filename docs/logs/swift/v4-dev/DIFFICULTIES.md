@@ -39,3 +39,11 @@ Purpose: Track blockers, root causes, and resolution paths.
 - Fix applied: Applied explicit normalized remap for .right-oriented processing before centroid-to-capture conversion in TrackingManager.
 - Validation result: Build-time diagnostics clean; dedicated on-device spatial alignment verification still pending.
 - Open risk: Additional explicit transform tests may be required if edge-of-frame projection drift appears.
+
+## 2026-04-15
+- Context: Projecting 3D object tracked coordinates (ARKit camera space) back to 2D UIKit/SwiftUI overlay points (`SpatialOverlayView`).
+- Symptom: 3D distance marker dots were spatially misaligned and drifted completely out of 2D bounding boxes during device rotation/movement.
+- Root cause (confirmed): Double rotation applied onto coordinates. Since projection maps 3D to 2D using ARKit intrinsics, the generated UV is inherently in native capture sensor coordinates. A hard-coded `1.0 - y, x` mapping flip was wrongly transforming it before `displayTransform.inverted()` was executed, effectively mirroring X/Y coordinates diagonally.
+- Fix applied: Removed the hard-coded UV flip from `uvToScreen`. Now directly applying `displayTransform.inverted()` to the intrinsic-provided projection pixel.
+- Validation result: Affine geometry transformations validated via Swift standalone test scripts; iOS simulator built cleanly (`** BUILD SUCCEEDED **`).
+- Open risk: None confirmed, requires physical iPhone real-world QA run.

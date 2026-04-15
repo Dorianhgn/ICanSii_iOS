@@ -24,3 +24,11 @@ Purpose: Task execution journal. What was done, which files were touched, which 
 - Finalized and committed the integrated slice.
   Files: 25 tracked files in commit.
   Commands/checks: git add (explicit file list), git commit, git rev-parse --short HEAD.
+
+## 2026-04-15T17:00:00Z
+- Debugged 3D marker reprojection drift compared to 2D YOLO boxes during device rotation.
+  Files: `ICanSii_iOS/SpatialOverlayView.swift`, `ICanSii_iOS/ContentView.swift`, `ICanSii_iOS/VisionCoordinateMapper.swift`.
+  Commands: Tested affine transforms/intrinsic projections via local swift simulator scripts, `xcodebuild` for iOS target validation.
+- Fixed erroneous 90-degree sensor-to-view rotation from ARKit-derived 3D markers.
+  Files: `ICanSii_iOS/SpatialOverlayView.swift`.
+  Commands: `xcodebuild` clean compile verification.

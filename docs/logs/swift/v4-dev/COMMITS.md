@@ -21,3 +21,11 @@ Purpose: Human-readable summary of commits and why they matter.
 - Impact: Introduces predictive tracking timeout at 1.0 s with per-step velocity decay 0.85; introduces distance-threshold vest activation behavior at 1.25 m and watchdog off at 0.5 s; adds synchronized frame-coupled detection ingestion path to reduce 3D/depth mismatch risk.
 - Datasets/targets impacted: iOS app target ICanSii_iOS; unit test source set Tests/SiiVisionTests (external to project target until Xcode target mapping).
 - Follow-up: Run device QA checklist on iPhone 17 Pro, confirm geometry mapping under real camera motion, then split subsequent tasks into smaller reviewable commits.
+
+## 2026-04-15
+- Date: 2026-04-15
+- Commit: (Pending) Fix 3D marker coordinate drift and double-rotation
+- Scope: ICanSii_iOS / SpatialOverlayView
+- Why: 3D positional distance markers for tracked objects were failing to align with 2D visual YOLO bounding boxes due to duplicated rotation mappings.
+- Impact: 3D point markers accurately lock to semantic object centerings across iOS coordinate orientations without drifting.
+- Follow-up: Need physical validations on iPhone 17 Pro to confirm final visual-haptic alignment matrices.

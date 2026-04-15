@@ -80,4 +80,35 @@ final class MaskSamplerTests: XCTestCase {
         XCTAssertNotNil(rightResult)
         XCTAssertGreaterThan(rightResult?.centroidUV.x ?? 0, 0.5)
     }
+
+    func testActivePixelsRemapToCaptureOrientation() throws {
+        let arr = try MLMultiArray(shape: [1, 32, 160, 160], dataType: .float32)
+        let ptr = arr.dataPointer.assumingMemoryBound(to: Float32.self)
+
+        for i in 0..<(32 * 160 * 160) {
+            ptr[i] = -1
+        }
+
+        // Activate one proto pixel at top-left so we can verify orientation remap.
+        for c in 0..<32 {
+            let idx = c * 160 * 160
+            ptr[idx] = 1
+        }
+
+        let coeffs = [Float](repeating: 1, count: 32)
+
+        let result = MaskSampler.assemble(
+            prototypes: arr,
+            coefficients: coeffs,
+            bbox: CGRect(x: 0, y: 0, width: 1.0 / 160.0, height: 1.0 / 160.0),
+            depthWidth: 4,
+            depthHeight: 2
+        )
+
+        XCTAssertNotNil(result)
+        guard let result else { return }
+
+        XCTAssertTrue(result.activePixels.contains { $0.col == 3 && $0.row == 0 })
+        XCTAssertFalse(result.activePixels.contains { $0.col == 0 && $0.row == 0 })
+    }
 }

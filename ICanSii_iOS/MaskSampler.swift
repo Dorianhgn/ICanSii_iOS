@@ -88,8 +88,13 @@ enum MaskSampler {
             let u = (Double(p.pw) + 0.5) / Double(protoSize)
             let v = (Double(p.ph) + 0.5) / Double(protoSize)
 
-            let col = min(depthWidth - 1, max(0, Int(u * Double(depthWidth))))
-            let row = min(depthHeight - 1, max(0, Int(v * Double(depthHeight))))
+            let depthPx = VisionCoordinateMapper.depthPixel(
+                fromVisionUV: CGPoint(x: u, y: v),
+                depthWidth: depthWidth,
+                depthHeight: depthHeight
+            )
+            let col = depthPx.col
+            let row = depthPx.row
             depthSet.insert(row * depthWidth + col)
         }
 

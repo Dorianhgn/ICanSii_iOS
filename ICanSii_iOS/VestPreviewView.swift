@@ -18,7 +18,7 @@ struct VestPreviewView: View {
                 .toggleStyle(.switch)
                 .padding(.horizontal)
 
-            grid(isBack: showBack)
+            faceGrid(isBack: showBack)
                 .padding(20)
                 .background(
                     RoundedRectangle(cornerRadius: 20, style: .continuous)
@@ -40,27 +40,20 @@ struct VestPreviewView: View {
         .foregroundStyle(.white)
     }
 
-    private func grid(isBack: Bool) -> some View {
-        HStack(spacing: 48) {
-            side(.left, isBack: isBack)
-            side(.right, isBack: isBack)
-        }
-    }
-
-    private func side(_ side: VestCell.Side, isBack: Bool) -> some View {
+    private func faceGrid(isBack: Bool) -> some View {
         VStack(spacing: 8) {
-            ForEach(0..<VestLayout.rowsPerSide, id: \.self) { row in
+            ForEach(0..<VestLayout.rowsPerFace, id: \.self) { row in
                 HStack(spacing: 8) {
-                    ForEach(0..<VestLayout.colsPerSide, id: \.self) { col in
-                        cellView(isBack: isBack, side: side, row: row, col: col)
+                    ForEach(0..<VestLayout.colsPerFace, id: \.self) { col in
+                        cellView(isBack: isBack, row: row, col: col)
                     }
                 }
             }
         }
     }
 
-    private func cellView(isBack: Bool, side: VestCell.Side, row: Int, col: Int) -> some View {
-        let id = "\(isBack ? "B" : "F")_\(side == .left ? "L" : "R")_r\(row)c\(col)"
+    private func cellView(isBack: Bool, row: Int, col: Int) -> some View {
+        let id = VestLayout.cellID(isBack: isBack, row: row, column: col)
         let intensity = min(max(transport.state.cells[id] ?? 0, 0), 1)
 
         return RoundedRectangle(cornerRadius: 8, style: .continuous)

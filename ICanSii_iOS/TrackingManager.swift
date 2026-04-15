@@ -65,10 +65,11 @@ final class TrackingManager: ObservableObject {
                 continue
             }
 
-            // Vision input uses .right orientation. Convert normalized model UV to capture UV.
-            let captureU = 1.0 - mask.centroidUV.y
-            let captureV = mask.centroidUV.x
-            let px = CGPoint(x: captureU * captureW, y: captureV * captureH)
+            let px = VisionCoordinateMapper.capturePixel(
+                fromVisionUV: mask.centroidUV,
+                captureWidth: captureW,
+                captureHeight: captureH
+            )
             let className = VisionClassNames.name(for: det.classId, fallback: det.label)
 
             enriched.append(
