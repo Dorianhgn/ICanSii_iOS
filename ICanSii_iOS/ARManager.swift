@@ -13,6 +13,8 @@ final class ARManager: NSObject, ObservableObject {
     @Published private(set) var supportsSceneDepth = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
     @Published var liveOrbitAngle: Float = 0.0
     @Published var displayTransform: CGAffineTransform = .identity
+    @Published private(set) var latestIntrinsics: simd_float3x3 = matrix_identity_float3x3
+    @Published private(set) var latestCaptureResolution: SIMD2<Int> = .zero
 
     private let session = ARSession()
     private let processingQueue = DispatchQueue(label: "sii.arkit.processing", qos: .userInteractive)
@@ -170,6 +172,8 @@ extension ARManager: ARSessionDelegate {
         // On publie la matrice pour SwiftUI
         DispatchQueue.main.async {
             self.displayTransform = displayTransform
+            self.latestIntrinsics = frame.camera.intrinsics
+            self.latestCaptureResolution = imageResolution
         }
 
         // Création de notre objet "SpatialFrame" intermédiaire. Cet objet va encapsuler 

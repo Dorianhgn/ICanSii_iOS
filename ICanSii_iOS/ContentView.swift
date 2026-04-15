@@ -2,8 +2,9 @@ import SwiftUI
 import Vision
 
 struct ContentView: View {
-    @StateObject private var arManager = ARManager()
-    @StateObject private var visionManager = VisionManager()
+    @ObservedObject var arManager: ARManager
+    @ObservedObject var visionManager: VisionManager
+    @ObservedObject var trackingManager: TrackingManager
     
     @State private var mode: SpatialDisplayMode = .rgb
     @State private var maxDistance: Float = 6.0
@@ -37,7 +38,10 @@ struct ContentView: View {
                     }
                     .overlay {
                         if mode == .rgb && visionManager.activeModel != .none {
-                            boundingBoxOverlay
+                            ZStack {
+                                boundingBoxOverlay
+                                SpatialOverlayView(tracking: trackingManager, arManager: arManager)
+                            }
                         }
                     }
                 } else {
@@ -59,16 +63,6 @@ struct ContentView: View {
             
             // --- BOUTON ENREGISTRER ---
             recordButton
-        }
-        .onAppear {
-            arManager.start()
-            arManager.setSemanticConsumer { spatialFrame in
-                visionManager.process(frame: spatialFrame)
-            }
-        }
-        .onDisappear {
-            arManager.stop()
-            arManager.setSemanticConsumer(nil)
         }
     }
     

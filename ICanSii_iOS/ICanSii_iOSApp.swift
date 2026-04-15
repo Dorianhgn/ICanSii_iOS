@@ -6,13 +6,12 @@
 //
 
 import SwiftUI
-import ARKit
 
 @main
 struct ICanSii_iOSApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            AppTabView()
         }
     }
 }

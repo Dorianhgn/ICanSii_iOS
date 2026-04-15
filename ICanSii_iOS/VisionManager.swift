@@ -15,6 +15,12 @@ struct YoloDetection: Identifiable {
     let maskCoefficients: [Float] // Les 32 valeurs du masque
 }
 
+struct VisionFrameOutput {
+    let detections: [YoloDetection]
+    let prototypes: MLMultiArray
+    let spatialFrame: SpatialFrame
+}
+
 enum YoloModelType: String, CaseIterable, Identifiable {
     case none = "None"
     case nano = "YOLO26n-seg"
@@ -39,6 +45,7 @@ final class VisionManager: ObservableObject {
     
     @Published var detections: [YoloDetection] = []
     @Published var currentPrototypes: MLMultiArray?
+    @Published var latestFrameOutput: VisionFrameOutput?
     @Published var fps: Double = 0.0
     @Published var inferenceTimeMs: Double = 0.0
     
@@ -46,6 +53,9 @@ final class VisionManager: ObservableObject {
     private var lastFrameTime: CFTimeInterval = 0
     private var frameCount: Int = 0
     private var fpsStartTime: CFTimeInterval = 0
+
+    private let pendingFrameLock = NSLock()
+    private var pendingFrame: SpatialFrame?
     
     init() {
         setupModel()
@@ -91,6 +101,10 @@ final class VisionManager: ObservableObject {
     // Fonction appelée par le ARManager (sur un thread de background)
     func process(frame: SpatialFrame) {
         guard let request = vnRequest else { return }
+
+        pendingFrameLock.lock()
+        pendingFrame = frame
+        pendingFrameLock.unlock()
         
         let startTime = CACurrentMediaTime()
         
@@ -124,6 +138,13 @@ final class VisionManager: ObservableObject {
     
     private func processResults(for request: VNRequest, error: Error?) {
         guard let results = request.results as? [VNCoreMLFeatureValueObservation] else { return }
+
+        pendingFrameLock.lock()
+        let frame = pendingFrame
+        pendingFrame = nil
+        pendingFrameLock.unlock()
+
+        guard let frame else { return }
         
         // Récupère les boîtes (Tenseur 3D) et les Prototypes (Tenseur 4D)
         guard let boxFeature = results.first(where: { $0.featureValue.multiArrayValue?.shape.count == 3 }),
@@ -176,6 +197,11 @@ final class VisionManager: ObservableObject {
         DispatchQueue.main.async {
             self.currentPrototypes = protoArray
             self.detections = newDetections
+            self.latestFrameOutput = VisionFrameOutput(
+                detections: newDetections,
+                prototypes: protoArray,
+                spatialFrame: frame
+            )
         }
     }
     
