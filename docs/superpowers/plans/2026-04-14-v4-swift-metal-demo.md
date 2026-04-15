@@ -18,13 +18,12 @@
 
 | File | Responsibility |
 |---|---|
-| `TrackingTypes.swift` | `TrackedObject3D` struct, `Detection2DWithDepth` helper, `BoundingBoxIoU` utility |
-| `Kalman1D.swift` | 2-state (position, velocity) Kalman filter for depth smoothing |
-| `PositionSmoother.swift` | Per-track FIFO + adaptive median (25th–75th percentile mean) |
-| `VelocityEstimator.swift` | Δposition/Δt with clamp, dt floor, and EMA smoothing |
-| `DepthSampler.swift` | ROI-median depth extraction from `CVPixelBuffer` (Float32 depth map from ARKit) |
+| `TrackingTypes.swift` | `TrackedObject3D` struct, `Detection2DWithDepth` helper (carries mask-derived `centroidUV` + `depthMeters` — no raw tensor refs), `BoundingBoxIoU` utility |
+| `Kalman3D.swift` | Unified 6-state Kalman filter `[x, y, z, vx, vy, vz]` — replaces the prior cascade of Kalman1D + PositionSmoother + VelocityEstimator. Returns smoothed 3D position AND 3D velocity per update with no FIFO latency. |
+| `MaskSampler.swift` | Assembles binary segmentation mask from `(prototypes 160×160×32) ⊗ (coeffs 32)` strictly inside the bbox, resamples to depth-map resolution (256×192) via **nearest-neighbour** to preserve binary edges. Pure pointer arithmetic on `MLMultiArray` and `CVPixelBuffer` — **no `[Float]` materialisation**. |
+| `DepthSampler.swift` | Mask-driven depth extraction from `CVPixelBuffer` (Float32 ARKit depth). Returns the **15th-percentile** depth over mask-active pixels, plus the **mask centroid in normalised UV (0..1)**. |
 | `Deprojection.swift` | `rs2_deproject_pixel_to_point` equivalent using `simd_float3x3` intrinsics + `ARCamera` utilities |
-| `Tracker.swift` | Greedy IoU + centroid-distance matcher, miss tolerance, predictive extrapolation, 3 s timeout |
+| `Tracker.swift` | Greedy IoU + centroid-distance matcher, miss tolerance, **1.0 s** predictive timeout with **0.85 / frame velocity decay** during prediction |
 | `TrackingManager.swift` | Orchestrator: subscribes to `VisionManager.detections` + `ARManager` frames → publishes `@Published var trackedObjects: [TrackedObject3D]` |
 | `VestMappingEngine.swift` | Pure logic: closest-marker selection, distance → intensity curve, Y → motor-direction mapping, 20-cell activation output |
 | `VestTypes.swift` | `VestCell`, `VestActivationState`, `HapticTransport` protocol, `PreviewTransport` (writes to a `@Published` state) |
@@ -45,11 +44,11 @@
 
 | File | Covers |
 |---|---|
-| `Kalman1DTests.swift` | Steady-state convergence, jitter rejection |
-| `PositionSmootherTests.swift` | Median behaviour with outlier |
-| `VelocityEstimatorTests.swift` | Clamp, dt floor, EMA correctness |
+| `Kalman3DTests.swift` | Convergence to constant position; linear-ramp tracking with stable velocity output; outlier rejection on z; instant velocity estimate (no FIFO warm-up) |
+| `MaskSamplerTests.swift` | Centroid of a synthetic disc mask matches geometric centre; nearest-neighbour resample preserves binary edges; bbox-restricted assembly ignores out-of-bbox pixels |
+| `DepthSamplerTests.swift` | 15th percentile over a synthetic mask returns the expected closer-surface value; rejects zero/inf/out-of-range; falls back to nil when mask has no active pixels |
 | `DeprojectionTests.swift` | Known pixel + depth + intrinsics → expected 3D point (numerical equivalence to pyrealsense2) |
-| `TrackerTests.swift` | ID persistence across frames, new-ID assignment, miss tolerance, 3 s predictive timeout |
+| `TrackerTests.swift` | ID persistence across frames, new-ID assignment, **1.0 s** predictive timeout, **velocity decay 0.85/frame** during prediction (velocity ≈ 0.85^N · v₀ after N missed frames) |
 | `VestMappingEngineTests.swift` | Closest-object selection, deadzone, beyond-threshold OFF, left/right/centre cell activation, intensity monotonicity |
 
 ---
@@ -61,15 +60,14 @@ Declared in `VestMappingEngine.swift` and `Tracker.swift` as `static let` so the
 | Name | Value | Source |
 |---|---|---|
 | `scoreThreshold` | `0.5` | exec summary |
-| `predictionTimeout` | `3.0` s | exec summary |
+| `depthMaskPercentile` | `0.15` (15th percentile) | captures the closest physical surface per mask without LiDAR-noise sensitivity |
+| `predictionTimeout` | `1.0` s | **revised — 0.5 s caused ID churn on brief occlusions; 3.0 s caused ghost obstacles for vest** |
+| `velocityDecay` | `0.85` per missed frame | **revised — applied each predict-only step so v → 0 over ~0.5 s; prevents constant-velocity ghost extrapolation** |
 | `hysteresisTime` | `0.2` s | exec summary |
-| `maxSpeedMps` | `6.0` m/s | exec summary |
-| `minSpeedDt` | `0.04` s | exec summary |
-| `speedEmaAlpha` | `0.45` | exec summary |
-| `fifoPositionSize` | `5` | exec summary |
-| `fifoVelocitySize` | `7` | exec summary |
-| `kalmanProcessVar` | `0.05` | exec summary |
-| `kalmanMeasurementVar` | `0.1` | exec summary |
+| `maxSpeedMps` | `6.0` m/s | exec summary — clamp on 3D speed magnitude inside `Kalman3D` post-update |
+| `kalman3DProcessNoisePos` | `1e-3` (m²/step) | tuned for ARKit VIO (cleaner than Jetson) — small position drift between frames |
+| `kalman3DProcessNoiseVel` | `5e-2` (m²/s²/step) | normal human walking dynamics: gentle accel, no teleportation |
+| `kalman3DMeasurementNoise` | `5e-3` (m²) | tighter than Jetson — LiDAR-fused ARKit `sceneDepth` is precise inside 5 m |
 | `vestDistanceThreshold` | `1.25` m | docs/v4.md |
 | `vestIntensityMin` | `0.0` | docs/v4.md (0–1 scale) |
 | `vestIntensityMax` | `1.0` | docs/v4.md |
@@ -77,7 +75,8 @@ Declared in `VestMappingEngine.swift` and `Tracker.swift` as `static let` so the
 | `vestOffsideIntensityFactor` | `0.25` | docs/v4.md |
 | `vestUpdateRateHz` | `5` Hz | docs/v4.md — sample-and-hold inside `VestMappingEngine` |
 | `watchdogTimeout` | `0.5` s | docs/v4.md — no-detection → all cells off |
-| `depthRoiFraction` | `0.1` (±10% of bbox) | exec summary |
+| `depthMaskPercentile` | `0.15` (15th percentile) | **revised — replaces ROI-median; captures closest physical surface per mask without LiDAR-noise sensitivity** |
+| `maskBinarisationThreshold` | `0.5` (post-sigmoid) | mask assembly: pixel is active iff `sigmoid(prototypes·coeffs) ≥ 0.5` |
 | `trackerIoUThreshold` | `0.3` | IoU+centroid tracker |
 | `trackerCentroidPxThreshold` | `80` px (640-space) | IoU+centroid tracker |
 
@@ -131,6 +130,7 @@ git commit -m "docs(v4): import ROS/Jetson reference + Swift/Metal port plan"
 ```swift
 import Foundation
 import simd
+import CoreML
 
 /// A 3D-reconstructed, ID-stable tracked object. Populated by TrackingManager each frame.
 struct TrackedObject3D: Identifiable, Equatable {
@@ -162,14 +162,29 @@ struct TrackedObject3D: Identifiable, Equatable {
     var distance: Float { simd_length(position) }
 }
 
-/// Intermediate: a 2D YOLO detection that has been enriched with a robust depth sample (metres).
+/// Intermediate: a 2D YOLO-seg detection enriched with mask-derived centroid and depth.
+///
+/// `MaskSampler.assemble(...)` runs in `TrackingManager.ingest(...)` at the frame boundary,
+/// converting raw prototypes ⊗ coefficients into a binary mask, then extracting the centroid
+/// and active-pixel list used by `DepthSampler`. All expensive work is done once per detection
+/// per frame; no tensor references are carried forward.
 struct Detection2DWithDepth {
-    let boundingBox: CGRect      // Normalised image coords (0..1, top-left origin, Vision convention)
-    let centroidPx: CGPoint      // Pixel centroid in 640-space
+    let boundingBox: CGRect             // Normalised image coords (0..1, top-left origin, Vision convention)
+
+    /// **Mask centroid in normalised UV (0..1)** — computed by `MaskSampler.assemble(...)`.
+    /// Stable against frame-to-frame bbox deformation; eliminates lateral jitter in the deprojected 3D position.
+    let centroidUV: CGPoint
+
+    /// **Capture-resolution pixel** for `Deprojection.deproject(...)` — `centroidUV * captureResolution`.
+    /// Computed in `TrackingManager` after `MaskSampler` returns.
+    let centroidPx: CGPoint
+
     let classId: Int
     let className: String
     let confidence: Float
-    let depthMeters: Float       // Robust ROI median depth
+
+    /// 15th-percentile depth in metres over mask-active pixels (NN-resampled to depth-map resolution).
+    let depthMeters: Float
 }
 
 /// Bounding-box IoU on normalised CGRect.
@@ -193,93 +208,155 @@ git commit -m "feat(tracking): introduce TrackedObject3D and Detection2DWithDept
 
 ---
 
-## Task 2: Kalman1D
+## Task 2: Kalman3D (replaces former Tasks 2 + 3 + 4)
+
+> **Architectural revision (2026-04-15):** the prior cascade — `Kalman1D` (depth) → `PositionSmoother` (5-frame FIFO median) → `VelocityEstimator` (Δp/Δt + 7-frame FIFO + EMA) — introduced ≥7 frames (~0.5 s @ 15 FPS) of velocity latency. For evasive haptic feedback this is unacceptable. Replaced by a single 6-state Kalman filter on 3D position + 3D velocity, fed the *raw* deprojected 3D point each frame, returning *instantaneous* smoothed position **and** velocity with no FIFO. Former Tasks 3 and 4 (`PositionSmoother`, `VelocityEstimator`) are deleted; their files are not created.
 
 **Files:**
-- Create: `ICanSii_iOS/Kalman1D.swift`
-- Create: `Tests/SiiVisionTests/Kalman1DTests.swift`
+- Create: `ICanSii_iOS/Kalman3D.swift`
+- Create: `Tests/SiiVisionTests/Kalman3DTests.swift`
 
-- [ ] **Step 2.1: Write the failing test**
+- [ ] **Step 2.1: Write the failing tests**
 
 ```swift
-// Tests/SiiVisionTests/Kalman1DTests.swift
+// Tests/SiiVisionTests/Kalman3DTests.swift
 import XCTest
+import simd
 @testable import ICanSii_iOS
 
-final class Kalman1DTests: XCTestCase {
-    func test_convergesToConstantSignal() {
-        var k = Kalman1D(processVar: 0.05, measurementVar: 0.1)
-        for _ in 0..<50 { _ = k.update(measurement: 2.0) }
-        XCTAssertEqual(k.estimate, 2.0, accuracy: 0.01)
+final class Kalman3DTests: XCTestCase {
+    func test_convergesToConstantPosition() {
+        var k = Kalman3D(qPos: 1e-3, qVel: 5e-2, rMeas: 5e-3)
+        let p = SIMD3<Float>(1, 2, -3)
+        for _ in 0..<50 { k.update(measurement: p, dt: 1.0/15.0) }
+        XCTAssertEqual(simd_distance(k.position, p), 0, accuracy: 0.02)
+        XCTAssertLessThan(simd_length(k.velocity), 0.05, "stationary target must yield ~0 velocity")
     }
 
-    func test_rejectsSingleOutlierRelativeToSteady() {
-        var k = Kalman1D(processVar: 0.05, measurementVar: 0.1)
-        for _ in 0..<20 { _ = k.update(measurement: 1.0) }
-        _ = k.update(measurement: 10.0)   // outlier
-        XCTAssertLessThan(k.estimate, 3.0, "single outlier must not pull estimate by > 2 m")
-    }
-
-    func test_tracksLinearRamp() {
-        var k = Kalman1D(processVar: 0.05, measurementVar: 0.1)
+    func test_tracksLinearRampWithStableVelocity() {
+        var k = Kalman3D(qPos: 1e-3, qVel: 5e-2, rMeas: 5e-3)
+        let dt: Float = 1.0/15.0
+        let v = SIMD3<Float>(0, 0, -1) // 1 m/s along −Z
         for i in 0..<30 {
-            _ = k.update(measurement: Float(i) * 0.1)
+            let p = v * Float(i) * dt
+            k.update(measurement: p, dt: dt)
         }
-        XCTAssertEqual(k.estimate, 2.9, accuracy: 0.3)
+        XCTAssertEqual(k.velocity.z, -1.0, accuracy: 0.15, "velocity must stabilise near the true 1 m/s after ~30 frames")
+    }
+
+    func test_rejectsSingleOutlier() {
+        var k = Kalman3D(qPos: 1e-3, qVel: 5e-2, rMeas: 5e-3)
+        for _ in 0..<20 { k.update(measurement: SIMD3<Float>(0, 0, -2), dt: 1.0/15.0) }
+        k.update(measurement: SIMD3<Float>(0, 0, -10), dt: 1.0/15.0) // outlier
+        XCTAssertLessThan(abs(k.position.z + 2), 1.5, "single outlier must not pull z-estimate by >1.5 m")
+    }
+
+    func test_predictOnlyDecaysVelocity() {
+        // Verifies the Tracker-side decay contract — Kalman3D itself only exposes a `predict(dt:)`
+        // that advances state without updating; decay multiplication is applied by the caller.
+        var k = Kalman3D(qPos: 1e-3, qVel: 5e-2, rMeas: 5e-3)
+        let dt: Float = 1.0/15.0
+        for i in 0..<10 { k.update(measurement: SIMD3<Float>(0, 0, Float(i) * -dt), dt: dt) }
+        let v0 = k.velocity
+        k.predict(dt: dt); k.applyVelocityDecay(0.85)
+        XCTAssertEqual(simd_length(k.velocity), simd_length(v0) * 0.85, accuracy: 0.05)
     }
 }
 ```
 
-- [ ] **Step 2.2: Write `Kalman1D.swift` to make tests pass**
+- [ ] **Step 2.2: Write `Kalman3D.swift` to make tests pass**
 
 ```swift
 import Foundation
+import simd
 
-/// 2-state (position, velocity) discrete Kalman filter with dt = 1 frame (unitless).
-/// Matches pykalman defaults used in v4 Jetson code.
-struct Kalman1D {
-    private var x: SIMD2<Float>                 // state: [position, velocity]
-    private var P: simd_float2x2                // covariance
-    private let Q: simd_float2x2                // process noise
-    private let R: Float                         // measurement variance (scalar)
-    private let F: simd_float2x2 = simd_float2x2(rows: [
-        SIMD2(1, 1),
-        SIMD2(0, 1)
-    ])
-    private let H: SIMD2<Float> = SIMD2(1, 0)   // observe position
+/// 6-state discrete Kalman filter on `[x, y, z, vx, vy, vz]`.
+/// Feeds on the raw 3D point (deprojected from mask-driven depth) each frame,
+/// returns instantaneous smoothed position AND velocity — no FIFO latency.
+///
+/// `predict(dt:)` and `applyVelocityDecay(_:)` are exposed separately so the
+/// `Tracker` can extrapolate with velocity decay during brief occlusions
+/// without corrupting the measurement-update path.
+struct Kalman3D {
+    private(set) var position: SIMD3<Float> = .zero
+    private(set) var velocity: SIMD3<Float> = .zero
+
+    // 6×6 covariance held as two 3×3 diagonals (pos–pos, vel–vel) and a
+    // pos–vel cross block. Full 6×6 is overkill for axis-independent noise.
+    private var Ppp: simd_float3x3
+    private var Pvv: simd_float3x3
+    private var Ppv: simd_float3x3
+
+    private let qPos: Float     // process noise on position (m²/step)
+    private let qVel: Float     // process noise on velocity (m²/s²/step)
+    private let rMeas: Float    // measurement noise (m²) — pos-only observation
     private var initialised = false
 
-    init(processVar: Float, measurementVar: Float) {
-        self.x = SIMD2(0, 0)
-        self.P = simd_float2x2(diagonal: SIMD2(1, 1))
-        self.Q = simd_float2x2(diagonal: SIMD2(processVar, processVar))
-        self.R = measurementVar
+    init(qPos: Float, qVel: Float, rMeas: Float) {
+        self.qPos = qPos
+        self.qVel = qVel
+        self.rMeas = rMeas
+        self.Ppp = simd_float3x3(diagonal: SIMD3(1, 1, 1))
+        self.Pvv = simd_float3x3(diagonal: SIMD3(1, 1, 1))
+        self.Ppv = simd_float3x3(0)
     }
 
-    var estimate: Float { x.x }
+    /// Initialise state from a first measurement without running a filter step.
+    mutating func seed(position p: SIMD3<Float>) {
+        self.position = p
+        self.velocity = .zero
+        self.initialised = true
+    }
 
-    @discardableResult
-    mutating func update(measurement z: Float) -> Float {
+    /// Advance the state by `dt` seconds without incorporating a measurement.
+    mutating func predict(dt: Float) {
+        guard initialised else { return }
+        position += velocity * dt
+        // Covariance propagation for F = [[I, dt·I],[0, I]]:
+        //   Ppp' = Ppp + dt (Ppv + Ppvᵀ) + dt² Pvv + Q_pos
+        //   Ppv' = Ppv + dt Pvv
+        //   Pvv' = Pvv + Q_vel
+        let dt2 = dt * dt
+        Ppp = Ppp
+            + simd_float3x3(diagonal: SIMD3(repeating: qPos))
+            + scale(Ppv, by: dt) + scale(Ppv.transpose, by: dt)
+            + scale(Pvv, by: dt2)
+        Ppv = Ppv + scale(Pvv, by: dt)
+        Pvv = Pvv + simd_float3x3(diagonal: SIMD3(repeating: qVel))
+    }
+
+    /// Apply a multiplicative decay to the velocity estimate (used by the
+    /// `Tracker` when a track is in predict-only mode during occlusion).
+    mutating func applyVelocityDecay(_ k: Float) {
+        velocity *= k
+    }
+
+    /// Incorporate a new 3D position measurement. `dt` is the elapsed time
+    /// since the last `update` / `predict`.
+    mutating func update(measurement z: SIMD3<Float>, dt: Float) {
         if !initialised {
-            x = SIMD2(z, 0)
-            initialised = true
-            return z
+            seed(position: z)
+            return
         }
-        // Predict
-        x = F * x
-        P = F * P * F.transpose + Q
-        // Update
-        let y = z - simd_dot(H, x)
-        let S = simd_dot(H, P * H) + R
-        let K = (P * H) / S
-        x = x + K * y
-        let I = simd_float2x2(diagonal: SIMD2(1, 1))
-        let KH = simd_float2x2(rows: [
-            SIMD2(K.x, 0) * 0 + SIMD2(K.x * H.x, K.x * H.y),
-            SIMD2(K.y * H.x, K.y * H.y)
-        ])
-        P = (I - KH) * P
-        return x.x
+        predict(dt: dt)
+        // Innovation S = Ppp + R·I (3×3), axis-decoupled → diagonal inverse.
+        let S = Ppp + simd_float3x3(diagonal: SIMD3(repeating: rMeas))
+        let Sinv = S.inverse
+        // Kalman gains: Kp = Ppp · S⁻¹ ; Kv = Ppvᵀ · S⁻¹
+        let Kp = Ppp * Sinv
+        let Kv = Ppv.transpose * Sinv
+        let y = z - position
+        position += Kp * y
+        velocity += Kv * y
+        // Covariance update (Joseph-free, fine for axis-decoupled R):
+        let I = simd_float3x3(diagonal: SIMD3(1, 1, 1))
+        Ppp = (I - Kp) * Ppp
+        Ppv = (I - Kp) * Ppv
+        Pvv = Pvv - Kv * Ppv   // Ppv is already post-update here
+    }
+
+    private func scale(_ m: simd_float3x3, by s: Float) -> simd_float3x3 {
+        simd_float3x3(m.columns.0 * s, m.columns.1 * s, m.columns.2 * s)
     }
 }
 ```
@@ -287,195 +364,261 @@ struct Kalman1D {
 - [ ] **Step 2.3: Commit**
 
 ```bash
-git add ICanSii_iOS/Kalman1D.swift Tests/SiiVisionTests/Kalman1DTests.swift
-git commit -m "feat(tracking): 1D Kalman filter for depth smoothing"
+git add ICanSii_iOS/Kalman3D.swift Tests/SiiVisionTests/Kalman3DTests.swift
+git commit -m "feat(tracking): unified 6-state Kalman3D replacing Kalman1D+smoother+velocity cascade"
 ```
 
 ---
 
-## Task 3: PositionSmoother
+## Task 3: MaskSampler
 
 **Files:**
-- Create: `ICanSii_iOS/PositionSmoother.swift`
-- Create: `Tests/SiiVisionTests/PositionSmootherTests.swift`
+- Create: `ICanSii_iOS/MaskSampler.swift`
+- Create: `Tests/SiiVisionTests/MaskSamplerTests.swift`
 
-- [ ] **Step 3.1: Write the failing test**
+Assembles a binary segmentation mask from `prototypes (1×32×160×160) ⊗ coefficients (32)` using pure pointer arithmetic on `MLMultiArray.dataPointer`. Only pixels inside the detection bounding box are considered. The result is:
+- `centroidUV`: first-moment centroid of active pixels in normalised 0..1 UV coordinates (Vision convention: origin top-left)
+- `activePixels`: list of `(col, row)` pairs at depth-map resolution (256×192) via nearest-neighbour resample
+
+The caller (`TrackingManager`) passes both outputs directly into `DepthSampler` and into `Detection2DWithDepth`. No `[Float]` materialisation of the full mask ever occurs.
+
+**CoreML tensor layout:** YOLO seg prototypes arrive as a 4D `MLMultiArray` with shape `[1, 32, 160, 160]` (batch, channels, height, width). Access pattern: `pointer[0 * 819200 + c * 25600 + ph * 160 + pw]`, simplified to `pointer[c * 25600 + ph * 160 + pw]` since batch is always 0.
+
+- [ ] **Step 3.1: Write the failing tests**
 
 ```swift
+// Tests/SiiVisionTests/MaskSamplerTests.swift
 import XCTest
-import simd
+import CoreML
 @testable import ICanSii_iOS
 
-final class PositionSmootherTests: XCTestCase {
-    func test_rejectsSingleOutlierInFive() {
-        var s = PositionSmoother(windowSize: 5)
-        for _ in 0..<4 { _ = s.submit(SIMD3<Float>(1, 1, 1)) }
-        let out = s.submit(SIMD3<Float>(100, 100, 100))
-        XCTAssertLessThan(simd_length(out - SIMD3(1, 1, 1)), 0.2)
+final class MaskSamplerTests: XCTestCase {
+
+    /// Build a synthetic [1,32,160,160] MLMultiArray where every prototype pixel is 1.0,
+    /// so that any positive coefficient vector produces a large positive dot → sigmoid ≈ 1 → all pixels active.
+    private func allOnesPrototypes() throws -> MLMultiArray {
+        let shape: [NSNumber] = [1, 32, 160, 160]
+        let arr = try MLMultiArray(shape: shape, dataType: .float32)
+        let ptr = arr.dataPointer.assumingMemoryBound(to: Float32.self)
+        for i in 0..<(32 * 160 * 160) { ptr[i] = 1.0 }
+        return arr
     }
 
-    func test_returnsFirstPointUntilFull() {
-        var s = PositionSmoother(windowSize: 5)
-        let first = SIMD3<Float>(5, 5, 5)
-        let out = s.submit(first)
-        XCTAssertEqual(out, first)
-    }
-}
-```
-
-- [ ] **Step 3.2: Implement**
-
-```swift
-import Foundation
-import simd
-
-/// FIFO of 3D points with adaptive median — mean of the 25th–75th percentile band, per axis.
-struct PositionSmoother {
-    private var buffer: [SIMD3<Float>] = []
-    private let windowSize: Int
-
-    init(windowSize: Int) { self.windowSize = windowSize }
-
-    mutating func submit(_ point: SIMD3<Float>) -> SIMD3<Float> {
-        buffer.append(point)
-        if buffer.count > windowSize { buffer.removeFirst() }
-        return smoothed()
+    /// All-zeros prototypes → dot = 0 → sigmoid = 0.5 → below threshold → no active pixels.
+    private func allZeroPrototypes() throws -> MLMultiArray {
+        let shape: [NSNumber] = [1, 32, 160, 160]
+        let arr = try MLMultiArray(shape: shape, dataType: .float32)
+        let ptr = arr.dataPointer.assumingMemoryBound(to: Float32.self)
+        for i in 0..<(32 * 160 * 160) { ptr[i] = 0.0 }
+        return arr
     }
 
-    private func smoothed() -> SIMD3<Float> {
-        guard buffer.count > 0 else { return .zero }
-        return SIMD3(
-            adaptiveMedian(buffer.map { $0.x }),
-            adaptiveMedian(buffer.map { $0.y }),
-            adaptiveMedian(buffer.map { $0.z })
+    func test_centroidOfFullBboxIsApproxCenter() throws {
+        let proto = try allOnesPrototypes()
+        let coeffs = [Float](repeating: 1.0, count: 32)  // all-positive → all pixels active
+        let bbox = CGRect(x: 0.0, y: 0.0, width: 1.0, height: 1.0)  // full image
+        let result = MaskSampler.assemble(
+            prototypes: proto, coefficients: coeffs,
+            bbox: bbox, depthWidth: 256, depthHeight: 192
         )
+        XCTAssertNotNil(result)
+        XCTAssertEqual(result!.centroidUV.x, 0.5, accuracy: 0.02)
+        XCTAssertEqual(result!.centroidUV.y, 0.5, accuracy: 0.02)
     }
 
-    private func adaptiveMedian(_ values: [Float]) -> Float {
-        let sorted = values.sorted()
-        let n = sorted.count
-        let lo = Int((Float(n) * 0.25).rounded(.down))
-        let hi = max(lo + 1, Int((Float(n) * 0.75).rounded(.up)))
-        let slice = sorted[lo..<min(hi, n)]
-        return slice.reduce(0, +) / Float(slice.count)
+    func test_noActivePixelsWhenAllZeroPrototypes() throws {
+        let proto = try allZeroPrototypes()
+        let coeffs = [Float](repeating: 1.0, count: 32)
+        let bbox = CGRect(x: 0.0, y: 0.0, width: 1.0, height: 1.0)
+        let result = MaskSampler.assemble(
+            prototypes: proto, coefficients: coeffs,
+            bbox: bbox, depthWidth: 256, depthHeight: 192
+        )
+        // sigmoid(0) = 0.5 which is equal to the threshold → should NOT be active (strict >=0.5 means equal is active;
+        // but with all-zero dot the value is exactly 0.5 — treat as threshold boundary.
+        // The important thing is that all-negative coefficients should yield nil.
+        // Use negative coefficients to push dot well below 0 → sigmoid ≪ 0.5 → nil.
+        let negCoeffs = [Float](repeating: -10.0, count: 32)
+        let result2 = MaskSampler.assemble(
+            prototypes: proto, coefficients: negCoeffs,
+            bbox: bbox, depthWidth: 256, depthHeight: 192
+        )
+        XCTAssertNil(result2)
+    }
+
+    func test_bboxRestrictionIgnoresOutsidePixels() throws {
+        // Prototypes where only the right half (pw >= 80) has positive values
+        let shape: [NSNumber] = [1, 32, 160, 160]
+        let arr = try MLMultiArray(shape: shape, dataType: .float32)
+        let ptr = arr.dataPointer.assumingMemoryBound(to: Float32.self)
+        for c in 0..<32 {
+            for ph in 0..<160 {
+                for pw in 0..<160 {
+                    // Right half: high dot; left half: very negative dot
+                    ptr[c * 25600 + ph * 160 + pw] = pw >= 80 ? 1.0 : -10.0
+                }
+            }
+        }
+        let coeffs = [Float](repeating: 1.0, count: 32)
+
+        // Bbox restricted to left half — should return nil (no active pixels)
+        let bboxLeft = CGRect(x: 0.0, y: 0.0, width: 0.5, height: 1.0)
+        let resultLeft = MaskSampler.assemble(
+            prototypes: arr, coefficients: coeffs,
+            bbox: bboxLeft, depthWidth: 256, depthHeight: 192
+        )
+        XCTAssertNil(resultLeft, "Left-half bbox over right-heavy prototypes should yield nil")
+
+        // Bbox over right half — should succeed with centroid x > 0.5
+        let bboxRight = CGRect(x: 0.5, y: 0.0, width: 0.5, height: 1.0)
+        let resultRight = MaskSampler.assemble(
+            prototypes: arr, coefficients: coeffs,
+            bbox: bboxRight, depthWidth: 256, depthHeight: 192
+        )
+        XCTAssertNotNil(resultRight)
+        XCTAssertGreaterThan(resultRight!.centroidUV.x, 0.5)
+    }
+
+    func test_depthPixelsAreWithinBounds() throws {
+        let proto = try allOnesPrototypes()
+        let coeffs = [Float](repeating: 1.0, count: 32)
+        let bbox = CGRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8)
+        let result = MaskSampler.assemble(
+            prototypes: proto, coefficients: coeffs,
+            bbox: bbox, depthWidth: 256, depthHeight: 192
+        )
+        XCTAssertNotNil(result)
+        for (col, row) in result!.activePixels {
+            XCTAssertGreaterThanOrEqual(col, 0)
+            XCTAssertLessThan(col, 256)
+            XCTAssertGreaterThanOrEqual(row, 0)
+            XCTAssertLessThan(row, 192)
+        }
     }
 }
 ```
 
-- [ ] **Step 3.3: Run and commit**
-
-```bash
-git add ICanSii_iOS/PositionSmoother.swift Tests/SiiVisionTests/PositionSmootherTests.swift
-git commit -m "feat(tracking): position FIFO + adaptive median smoother"
-```
-
----
-
-## Task 4: VelocityEstimator
-
-**Files:**
-- Create: `ICanSii_iOS/VelocityEstimator.swift`
-- Create: `Tests/SiiVisionTests/VelocityEstimatorTests.swift`
-
-- [ ] **Step 4.1: Failing tests**
-
-```swift
-import XCTest
-import simd
-@testable import ICanSii_iOS
-
-final class VelocityEstimatorTests: XCTestCase {
-    func test_clampsAboveMaxSpeed() {
-        var e = VelocityEstimator(maxSpeed: 6.0, minDt: 0.04, emaAlpha: 1.0, historySize: 7)
-        _ = e.submit(position: SIMD3(0,0,0), timestamp: 0)
-        let v = e.submit(position: SIMD3(100,0,0), timestamp: 0.1) // 1000 m/s would be raw
-        XCTAssertLessThanOrEqual(simd_length(v.velocity), 6.0 + 0.001)
-    }
-
-    func test_ignoresSubMinimalDt() {
-        var e = VelocityEstimator(maxSpeed: 6.0, minDt: 0.04, emaAlpha: 1.0, historySize: 7)
-        _ = e.submit(position: SIMD3(0,0,0), timestamp: 0)
-        let v = e.submit(position: SIMD3(1,0,0), timestamp: 0.01) // dt < minDt
-        XCTAssertEqual(simd_length(v.velocity), 0, accuracy: 0.001)
-    }
-
-    func test_emaBlendsHistory() {
-        var e = VelocityEstimator(maxSpeed: 10.0, minDt: 0.0, emaAlpha: 0.5, historySize: 7)
-        _ = e.submit(position: SIMD3(0,0,0), timestamp: 0)
-        _ = e.submit(position: SIMD3(1,0,0), timestamp: 1) // v=1
-        let v = e.submit(position: SIMD3(1,0,0), timestamp: 2) // v=0, EMA blends
-        XCTAssertGreaterThan(v.smoothedSpeed, 0.0)
-        XCTAssertLessThan(v.smoothedSpeed, 1.0)
-    }
-}
-```
-
-- [ ] **Step 4.2: Implement**
+- [ ] **Step 3.2: Implement `MaskSampler.swift`**
 
 ```swift
 import Foundation
-import simd
+import CoreML
+import CoreGraphics
 
-struct VelocityEstimator {
-    struct Output { let velocity: SIMD3<Float>; let smoothedSpeed: Float }
-
-    private let maxSpeed: Float
-    private let minDt: Float
-    private let emaAlpha: Float
-    private let historySize: Int
-
-    private var lastPos: SIMD3<Float>?
-    private var lastTs: TimeInterval?
-    private var speedHistory: [Float] = []
-    private var smoothedSpeedState: Float = 0
-
-    init(maxSpeed: Float, minDt: Float, emaAlpha: Float, historySize: Int) {
-        self.maxSpeed = maxSpeed
-        self.minDt = minDt
-        self.emaAlpha = emaAlpha
-        self.historySize = historySize
+enum MaskSampler {
+    struct Result {
+        /// Centroid of active mask pixels in normalised 0..1 UV (Vision convention: origin top-left).
+        let centroidUV: CGPoint
+        /// (col, row) pairs at depth-map resolution for use by DepthSampler. May contain duplicates
+        /// from NN resampling; DepthSampler ignores them (duplicate reads of the same pixel are fine).
+        let activePixels: [(col: Int, row: Int)]
     }
 
-    mutating func submit(position: SIMD3<Float>, timestamp: TimeInterval) -> Output {
-        defer { lastPos = position; lastTs = timestamp }
-        guard let p0 = lastPos, let t0 = lastTs else {
-            return Output(velocity: .zero, smoothedSpeed: 0)
-        }
-        let dt = Float(timestamp - t0)
-        guard dt >= minDt else {
-            return Output(velocity: .zero, smoothedSpeed: smoothedSpeedState)
-        }
-        var v = (position - p0) / dt
-        let speed = simd_length(v)
-        if speed > maxSpeed && speed > 0 { v = v * (maxSpeed / speed) }
+    static let protoSize = 160        // YOLO seg prototype spatial dimension
+    static let numChannels = 32       // YOLO seg prototype channels
+    static let maskThreshold: Float = 0.5
 
-        let emaSample = min(simd_length(v), maxSpeed)
-        smoothedSpeedState = emaAlpha * emaSample + (1 - emaAlpha) * smoothedSpeedState
-        speedHistory.append(smoothedSpeedState)
-        if speedHistory.count > historySize { speedHistory.removeFirst() }
-        return Output(velocity: v, smoothedSpeed: smoothedSpeedState)
+    /// Assemble binary mask from YOLO prototypes ⊗ coefficients restricted to `bbox`.
+    ///
+    /// - Parameters:
+    ///   - prototypes: 4D `MLMultiArray` with shape `[1, 32, 160, 160]` from `VisionManager.currentPrototypes`.
+    ///   - coefficients: 32 per-detection mask coefficients from `YoloDetection.maskCoefficients`.
+    ///   - bbox: detection bounding box in normalised 0..1 Vision coords (origin top-left).
+    ///   - depthWidth / depthHeight: ARKit depth map dimensions (typically 256×192).
+    /// - Returns: `Result` with centroid + active pixel list, or `nil` if no pixels are active.
+    static func assemble(
+        prototypes: MLMultiArray,
+        coefficients: [Float],
+        bbox: CGRect,
+        depthWidth: Int,
+        depthHeight: Int
+    ) -> Result? {
+        // Validate tensor shape [1, 32, 160, 160]
+        guard prototypes.shape.count == 4,
+              prototypes.shape[1].intValue == numChannels,
+              prototypes.shape[2].intValue == protoSize,
+              prototypes.shape[3].intValue == protoSize,
+              coefficients.count == numChannels
+        else { return nil }
+
+        let ptr = prototypes.dataPointer.assumingMemoryBound(to: Float32.self)
+        // stride per channel: 160 * 160 = 25600 (batch stride skipped, batch=0 always)
+        let chanStride = protoSize * protoSize
+
+        // Convert bbox from normalised → proto pixel coords (clamp to [0, 159])
+        let pw0 = max(0, Int((bbox.minX * CGFloat(protoSize)).rounded(.down)))
+        let pw1 = min(protoSize - 1, Int((bbox.maxX * CGFloat(protoSize)).rounded(.up)))
+        let ph0 = max(0, Int((bbox.minY * CGFloat(protoSize)).rounded(.down)))
+        let ph1 = min(protoSize - 1, Int((bbox.maxY * CGFloat(protoSize)).rounded(.up)))
+        guard pw1 > pw0, ph1 > ph0 else { return nil }
+
+        // Assemble mask in proto space; accumulate centroid moments
+        var sumX: Double = 0, sumY: Double = 0, count: Int = 0
+        var protoActive: [(ph: Int, pw: Int)] = []
+        protoActive.reserveCapacity((ph1 - ph0 + 1) * (pw1 - pw0 + 1) / 2)
+
+        for ph in ph0...ph1 {
+            let rowBase = ph * protoSize
+            for pw in pw0...pw1 {
+                // dot product: sum(proto[c, ph, pw] * coeff[c])
+                var dot: Float = 0
+                for c in 0..<numChannels {
+                    dot += ptr[c * chanStride + rowBase + pw] * coefficients[c]
+                }
+                // sigmoid threshold
+                let sig: Float = 1.0 / (1.0 + expf(-dot))
+                if sig >= maskThreshold {
+                    protoActive.append((ph, pw))
+                    sumX += Double(pw)
+                    sumY += Double(ph)
+                    count += 1
+                }
+            }
+        }
+        guard count > 0 else { return nil }
+
+        let centroidUV = CGPoint(
+            x: (sumX / Double(count)) / Double(protoSize),
+            y: (sumY / Double(count)) / Double(protoSize)
+        )
+
+        // Resample active proto pixels → depth-map resolution via nearest-neighbour
+        let scaleX = Double(depthWidth)  / Double(protoSize)
+        let scaleY = Double(depthHeight) / Double(protoSize)
+
+        // Use a flat set to deduplicate depth pixels (multiple proto pixels may map to same depth pixel)
+        var depthSet = Set<Int>()
+        depthSet.reserveCapacity(protoActive.count)
+        for (ph, pw) in protoActive {
+            let dc = min(depthWidth  - 1, Int(Double(pw) * scaleX))
+            let dr = min(depthHeight - 1, Int(Double(ph) * scaleY))
+            depthSet.insert(dr * depthWidth + dc)
+        }
+
+        let activePixels = depthSet.map { idx in (col: idx % depthWidth, row: idx / depthWidth) }
+        return Result(centroidUV: centroidUV, activePixels: activePixels)
     }
 }
 ```
 
-- [ ] **Step 4.3: Commit**
+- [ ] **Step 3.3: Commit**
 
 ```bash
-git add ICanSii_iOS/VelocityEstimator.swift Tests/SiiVisionTests/VelocityEstimatorTests.swift
-git commit -m "feat(tracking): velocity estimator with clamp, dt floor, EMA"
+git add ICanSii_iOS/MaskSampler.swift Tests/SiiVisionTests/MaskSamplerTests.swift
+git commit -m "feat(mask): MaskSampler assembles binary seg mask and centroid from YOLO prototypes"
 ```
 
 ---
 
-## Task 5: DepthSampler (ROI-median from ARKit depth CVPixelBuffer)
+## Task 5: DepthSampler (mask-driven 15th-percentile from ARKit depth CVPixelBuffer)
 
 **Files:**
 - Create: `ICanSii_iOS/DepthSampler.swift`
 - Create: `Tests/SiiVisionTests/DepthSamplerTests.swift`
 
-Context: `SpatialFrame.depthMap` is a Float32 `CVPixelBuffer` from ARKit (typically 256×192 on LiDAR). `ARManager` already locks/unlocks the base address idiomatically (see `readCenterDepth` in `ARManager.swift:89-118`). `yolo26s-seg` emits boxes normalised to 640×640 input but Vision handles the scale — we always work in **normalised 0..1 image coordinates** and sample the depth map at `floor(u * depthWidth)`, `floor(v * depthHeight)`.
+Context: `SpatialFrame.depthMap` is a Float32 `CVPixelBuffer` from ARKit (typically 256×192 on LiDAR). `ARManager` already locks/unlocks the base address idiomatically. `MaskSampler` provides a list of `(col, row)` pairs already at depth-map resolution — `DepthSampler` just reads those specific pixels, sorts, and returns the 15th-percentile value.
 
-- [ ] **Step 5.1: Failing test (uses a hand-built `CVPixelBuffer`)**
+- [ ] **Step 5.1: Failing test (uses hand-built `CVPixelBuffer` + synthetic pixel list)**
 
 ```swift
 import XCTest
@@ -483,33 +626,58 @@ import CoreVideo
 @testable import ICanSii_iOS
 
 final class DepthSamplerTests: XCTestCase {
-    func test_medianOfConstantROIIsConstant() throws {
-        let buf = try makeFloatBuffer(width: 10, height: 10, fill: 2.5)
-        let roi = CGRect(x: 0.3, y: 0.3, width: 0.4, height: 0.4)
-        let d = DepthSampler.robustDepth(depthMap: buf, normalisedROI: roi, roiFraction: 1.0)
-        XCTAssertEqual(d ?? -1, 2.5, accuracy: 0.001)
-    }
 
-    func test_rejectsZeroAndInfinity() throws {
-        let buf = try makeFloatBuffer(width: 10, height: 10, fill: 0.0)
-        let roi = CGRect(x: 0, y: 0, width: 1, height: 1)
-        XCTAssertNil(DepthSampler.robustDepth(depthMap: buf, normalisedROI: roi, roiFraction: 1.0))
-    }
-
-    private func makeFloatBuffer(width: Int, height: Int, fill: Float) throws -> CVPixelBuffer {
+    private func makeFloatBuffer(width: Int, height: Int, fill: Float) -> CVPixelBuffer {
         var out: CVPixelBuffer?
         let attrs: [String: Any] = [kCVPixelBufferIOSurfacePropertiesKey as String: [:]]
         CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_DepthFloat32, attrs as CFDictionary, &out)
         let buf = out!
         CVPixelBufferLockBaseAddress(buf, [])
         let base = CVPixelBufferGetBaseAddress(buf)!
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(buf)
+        let bpr = CVPixelBufferGetBytesPerRow(buf)
         for r in 0..<height {
-            let row = base.advanced(by: r * bytesPerRow).assumingMemoryBound(to: Float32.self)
+            let row = base.advanced(by: r * bpr).assumingMemoryBound(to: Float32.self)
             for c in 0..<width { row[c] = fill }
         }
         CVPixelBufferUnlockBaseAddress(buf, [])
         return buf
+    }
+
+    func test_15thPercentileOverConstantBufferIsConstant() {
+        let buf = makeFloatBuffer(width: 10, height: 10, fill: 2.5)
+        let pixels = (0..<10).flatMap { row in (0..<10).map { col in (col: col, row: row) } }
+        let d = DepthSampler.sample(depthMap: buf, activePixels: pixels)
+        XCTAssertEqual(d ?? -1, 2.5, accuracy: 0.001)
+    }
+
+    func test_rejectsZeroDepthPixels() {
+        let buf = makeFloatBuffer(width: 10, height: 10, fill: 0.0)
+        let pixels = [(col: 5, row: 5)]
+        XCTAssertNil(DepthSampler.sample(depthMap: buf, activePixels: pixels))
+    }
+
+    func test_nilWhenNoActivePixels() {
+        let buf = makeFloatBuffer(width: 10, height: 10, fill: 1.0)
+        XCTAssertNil(DepthSampler.sample(depthMap: buf, activePixels: []))
+    }
+
+    func test_15thPercentilePicksCloserSurface() {
+        // 100 pixels: 85 at 3.0 m (far), 15 at 0.5 m (close)
+        // 15th percentile should return a value from the close surface
+        var out: CVPixelBuffer?
+        CVPixelBufferCreate(nil, 100, 1, kCVPixelFormatType_DepthFloat32,
+                            [kCVPixelBufferIOSurfacePropertiesKey as String: [:]] as CFDictionary, &out)
+        let buf = out!
+        CVPixelBufferLockBaseAddress(buf, [])
+        let base = CVPixelBufferGetBaseAddress(buf)!.assumingMemoryBound(to: Float32.self)
+        for i in 0..<15 { base[i] = 0.5 }
+        for i in 15..<100 { base[i] = 3.0 }
+        CVPixelBufferUnlockBaseAddress(buf, [])
+
+        let pixels = (0..<100).map { (col: $0, row: 0) }
+        let d = DepthSampler.sample(depthMap: buf, activePixels: pixels)
+        XCTAssertNotNil(d)
+        XCTAssertLessThan(d!, 1.0, "15th percentile of a mix with 15 close pixels should be ≤ 0.5 m")
     }
 }
 ```
@@ -519,20 +687,17 @@ final class DepthSamplerTests: XCTestCase {
 ```swift
 import Foundation
 import CoreVideo
-import CoreGraphics
 
 enum DepthSampler {
-    /// Robust ROI median of a Float32 depth map in metres.
+    /// Returns the 15th-percentile depth (metres) over a set of mask-active pixels in an ARKit Float32 depth map.
+    ///
     /// - Parameters:
-    ///   - depthMap: Float32 CVPixelBuffer (ARKit sceneDepth / smoothedSceneDepth).
-    ///   - normalisedROI: bbox in (0..1) image coords (Vision convention: origin top-left).
-    ///   - roiFraction: shrink the sampled ROI to this fraction of bbox width/height (v4: 0.1 → ±10%).
-    /// - Returns: median depth in metres, or nil if no valid pixels.
-    static func robustDepth(
-        depthMap: CVPixelBuffer,
-        normalisedROI bbox: CGRect,
-        roiFraction: CGFloat
-    ) -> Float? {
+    ///   - depthMap: Float32 CVPixelBuffer (ARKit sceneDepth / smoothedSceneDepth, typically 256×192).
+    ///   - activePixels: `(col, row)` pairs at depth-map resolution — output of `MaskSampler.assemble(...)`.
+    /// - Returns: 15th-percentile depth in metres over valid pixels, or `nil` if no valid pixels.
+    static func sample(depthMap: CVPixelBuffer, activePixels: [(col: Int, row: Int)]) -> Float? {
+        guard !activePixels.isEmpty else { return nil }
+
         CVPixelBufferLockBaseAddress(depthMap, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
         guard let base = CVPixelBufferGetBaseAddress(depthMap) else { return nil }
@@ -541,29 +706,20 @@ enum DepthSampler {
         let h = CVPixelBufferGetHeight(depthMap)
         let bytesPerRow = CVPixelBufferGetBytesPerRow(depthMap)
 
-        let cx = bbox.midX * CGFloat(w)
-        let cy = bbox.midY * CGFloat(h)
-        let halfW = bbox.width  * CGFloat(w) * roiFraction * 0.5
-        let halfH = bbox.height * CGFloat(h) * roiFraction * 0.5
-
-        let x0 = max(0, Int((cx - halfW).rounded(.down)))
-        let x1 = min(w - 1, Int((cx + halfW).rounded(.up)))
-        let y0 = max(0, Int((cy - halfH).rounded(.down)))
-        let y1 = min(h - 1, Int((cy + halfH).rounded(.up)))
-        guard x1 > x0, y1 > y0 else { return nil }
-
         var samples: [Float] = []
-        samples.reserveCapacity((x1 - x0 + 1) * (y1 - y0 + 1))
-        for y in y0...y1 {
-            let row = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: Float32.self)
-            for x in x0...x1 {
-                let v = row[x]
-                if v.isFinite && v > 0 && v < 10.0 { samples.append(v) }   // 10 m cap (ARKit LiDAR range)
-            }
+        samples.reserveCapacity(activePixels.count)
+
+        for (col, row) in activePixels {
+            guard col >= 0, col < w, row >= 0, row < h else { continue }
+            let v = base.advanced(by: row * bytesPerRow)
+                        .assumingMemoryBound(to: Float32.self)[col]
+            if v.isFinite && v > 0 && v < 10.0 { samples.append(v) }  // ARKit LiDAR valid range
         }
         guard !samples.isEmpty else { return nil }
+
         samples.sort()
-        return samples[samples.count / 2]
+        let idx = max(0, Int(Float(samples.count) * 0.15))
+        return samples[idx]
     }
 }
 ```
@@ -572,7 +728,7 @@ enum DepthSampler {
 
 ```bash
 git add ICanSii_iOS/DepthSampler.swift Tests/SiiVisionTests/DepthSamplerTests.swift
-git commit -m "feat(depth): robust ROI-median sampler for ARKit Float32 depth"
+git commit -m "feat(depth): mask-driven 15th-percentile DepthSampler for ARKit Float32 depth"
 ```
 
 ---
@@ -659,7 +815,7 @@ git commit -m "feat(3d): pixel+depth→3D deprojection in ARKit camera space"
 - Create: `ICanSii_iOS/Tracker.swift`
 - Create: `Tests/SiiVisionTests/TrackerTests.swift`
 
-Design: one `TrackState` per tracker ID holding the Kalman, position smoother, velocity estimator, last bbox, last update time, confidence, class. Frame step: (1) predict — every existing track ages its `timeSinceSeen`; (2) match — greedy assignment of current `Detection2DWithDepth` to tracks by (`IoU >= 0.3` OR `centroid distance < 80 px`), highest-first; (3) update matched tracks with new 3D position from Kalman(depth) + deprojection + smoother + velocity; (4) create new tracks for unmatched detections; (5) extrapolate unmatched tracks using last velocity for up to `predictionTimeout = 3 s`, then drop.
+Design: one `TrackState` per tracker ID holding a single `Kalman3D` (6-state `[x,y,z,vx,vy,vz]`) plus last bbox, last update time, confidence, class. Frame step: (1) predict — every existing track ages its `timeSinceSeen`; (2) match — greedy assignment of current `Detection2DWithDepth` to tracks by (`IoU >= 0.3` OR `centroid distance < 80 px`), highest-first; (3) update matched tracks via `Kalman3D.update(measurement:dt:)` on the deprojected 3D centroid, reading smoothed position and velocity back from the filter; (4) create new tracks for unmatched detections; (5) extrapolate unmatched tracks by calling `Kalman3D.predict(dt:)` followed by `applyVelocityDecay(velocityDecay)` each frame for up to `predictionTimeout = 1 s`, then drop.
 
 - [ ] **Step 7.1: Failing tests**
 
@@ -673,6 +829,7 @@ final class TrackerTests: XCTestCase {
         var t = Tracker()
         let det = Detection2DWithDepth(
             boundingBox: CGRect(x: 0.4, y: 0.4, width: 0.2, height: 0.2),
+            centroidUV: CGPoint(x: 0.5, y: 0.5),
             centroidPx: CGPoint(x: 320, y: 320),
             classId: 0, className: "person", confidence: 0.9, depthMeters: 2.0
         )
@@ -687,6 +844,7 @@ final class TrackerTests: XCTestCase {
         let K = dummyIntrinsics()
         let det = Detection2DWithDepth(
             boundingBox: CGRect(x: 0.4, y: 0.4, width: 0.2, height: 0.2),
+            centroidUV: CGPoint(x: 0.5, y: 0.5),
             centroidPx: CGPoint(x: 320, y: 320),
             classId: 0, className: "person", confidence: 0.9, depthMeters: 2.0
         )
@@ -702,6 +860,7 @@ final class TrackerTests: XCTestCase {
         let K = dummyIntrinsics()
         let det = Detection2DWithDepth(
             boundingBox: CGRect(x: 0.4, y: 0.4, width: 0.2, height: 0.2),
+            centroidUV: CGPoint(x: 0.5, y: 0.5),
             centroidPx: CGPoint(x: 320, y: 320),
             classId: 0, className: "person", confidence: 0.9, depthMeters: 2.0
         )
@@ -734,15 +893,13 @@ final class Tracker {
     struct Params {
         var iouThreshold: Float = 0.3
         var centroidPxThreshold: Float = 80
-        var predictionTimeout: TimeInterval = 3.0
+        var predictionTimeout: TimeInterval = 1.0
+        var velocityDecay: Float = 0.85
         var hysteresisTime: TimeInterval = 0.2
         var maxSpeedMps: Float = 6.0
-        var minSpeedDt: Float = 0.04
-        var speedEmaAlpha: Float = 0.45
-        var fifoPositionSize: Int = 5
-        var fifoVelocitySize: Int = 7
-        var kalmanProcessVar: Float = 0.05
-        var kalmanMeasurementVar: Float = 0.1
+        var kalman3DProcessNoisePos: Float = 1e-3
+        var kalman3DProcessNoiseVel: Float = 5e-2
+        var kalman3DMeasurementNoise: Float = 5e-3
     }
 
     private struct State {
@@ -752,9 +909,7 @@ final class Tracker {
         var confidence: Float
         var lastBoundingBox: CGRect
         var lastCentroidPx: CGPoint
-        var depthKalman: Kalman1D
-        var positionSmoother: PositionSmoother
-        var velocityEstimator: VelocityEstimator
+        var kalman: Kalman3D
         var position: SIMD3<Float>
         var velocity: SIMD3<Float>
         var speedSmoothed: Float
@@ -813,18 +968,20 @@ final class Tracker {
 
     private func updateTrack(id: Int, det: Detection2DWithDepth, intrinsics K: simd_float3x3, ts: TimeInterval) {
         var s = states[id]!
-        let zFiltered = s.depthKalman.update(measurement: det.depthMeters)
-        let raw = Deprojection.deproject(pixel: det.centroidPx, depthMeters: zFiltered, intrinsics: K)
-        let smoothed = s.positionSmoother.submit(raw)
-        let v = s.velocityEstimator.submit(position: smoothed, timestamp: ts)
+        let raw = Deprojection.deproject(pixel: det.centroidPx, depthMeters: det.depthMeters, intrinsics: K)
+        let dt = Float(max(ts - s.updatedTs, 1e-3))
+        s.kalman.update(measurement: raw, dt: dt)
+        let smoothed = s.kalman.position
+        let vVec = s.kalman.velocity
+        let speedClamped = min(simd_length(vVec), params.maxSpeedMps)
         s.classId = det.classId
         s.className = det.className
         s.confidence = det.confidence
         s.lastBoundingBox = det.boundingBox
         s.lastCentroidPx = det.centroidPx
         s.position = smoothed
-        s.velocity = v.velocity
-        s.speedSmoothed = v.smoothedSpeed
+        s.velocity = vVec
+        s.speedSmoothed = speedClamped
         s.lastSeenTs = ts
         s.updatedTs = ts
         s.isPredictive = false
@@ -832,23 +989,18 @@ final class Tracker {
     }
 
     private func createTrack(det: Detection2DWithDepth, intrinsics K: simd_float3x3, ts: TimeInterval) {
-        var kalman = Kalman1D(processVar: params.kalmanProcessVar, measurementVar: params.kalmanMeasurementVar)
-        let zFiltered = kalman.update(measurement: det.depthMeters)
-        let pos = Deprojection.deproject(pixel: det.centroidPx, depthMeters: zFiltered, intrinsics: K)
-        var smoother = PositionSmoother(windowSize: params.fifoPositionSize)
-        let smoothed = smoother.submit(pos)
-        var est = VelocityEstimator(
-            maxSpeed: params.maxSpeedMps,
-            minDt: params.minSpeedDt,
-            emaAlpha: params.speedEmaAlpha,
-            historySize: params.fifoVelocitySize
+        var kalman = Kalman3D(
+            qPos: params.kalman3DProcessNoisePos,
+            qVel: params.kalman3DProcessNoiseVel,
+            rMeas: params.kalman3DMeasurementNoise
         )
-        _ = est.submit(position: smoothed, timestamp: ts)
+        let pos = Deprojection.deproject(pixel: det.centroidPx, depthMeters: det.depthMeters, intrinsics: K)
+        kalman.seed(position: pos)
         states[nextId] = State(
             id: nextId, classId: det.classId, className: det.className, confidence: det.confidence,
             lastBoundingBox: det.boundingBox, lastCentroidPx: det.centroidPx,
-            depthKalman: kalman, positionSmoother: smoother, velocityEstimator: est,
-            position: smoothed, velocity: .zero, speedSmoothed: 0,
+            kalman: kalman,
+            position: pos, velocity: .zero, speedSmoothed: 0,
             lastSeenTs: ts, updatedTs: ts, isPredictive: false
         )
         nextId += 1
@@ -858,8 +1010,12 @@ final class Tracker {
         guard var s = states[id] else { return }
         let age = ts - s.lastSeenTs
         if age > params.predictionTimeout { states.removeValue(forKey: id); return }
-        let dt = Float(ts - s.updatedTs)
-        s.position += s.velocity * dt
+        let dt = Float(max(ts - s.updatedTs, 1e-3))
+        s.kalman.predict(dt: dt)
+        s.kalman.applyVelocityDecay(params.velocityDecay)
+        s.position = s.kalman.position
+        s.velocity = s.kalman.velocity
+        s.speedSmoothed = min(simd_length(s.velocity), params.maxSpeedMps)
         s.updatedTs = ts
         s.isPredictive = true
         states[id] = s
@@ -905,18 +1061,21 @@ import Foundation
 import Combine
 import ARKit
 import CoreGraphics
+import CoreML
+import CoreVideo
 
 final class TrackingManager: ObservableObject {
     static let allowedClassIds: Set<Int> = [
         0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,56,57,58,59,60,72
     ]
     static let scoreThreshold: Float = 0.5
-    static let depthRoiFraction: CGFloat = 0.1
 
     @Published private(set) var trackedObjects: [TrackedObject3D] = []
 
     private let tracker = Tracker()
     private var lastSpatialFrame: SpatialFrame?
+    // Prototypes are captured atomically alongside detections — both published on main thread by VisionManager.
+    private var lastPrototypes: MLMultiArray?
     private let lock = NSLock()
     private var cancellables: [AnyCancellable] = []
 
@@ -929,20 +1088,38 @@ final class TrackingManager: ObservableObject {
             }
             .store(in: &cancellables)
 
+        // Zip detections with current prototypes — both are set atomically on the main thread by
+        // VisionManager.processResults, so reading them together here gives a consistent pair.
         visionManager.$detections
             .receive(on: DispatchQueue.global(qos: .userInitiated))
             .sink { [weak self] detections in
-                self?.ingest(detections: detections)
+                guard let self = self else { return }
+                // Snapshot prototypes on the calling thread (already on main via the publisher chain).
+                // We'll read lastPrototypes from the lock-protected store below.
+                self.lock.lock()
+                let frame = self.lastSpatialFrame
+                let prototypes = self.lastPrototypes
+                self.lock.unlock()
+                self.ingest(detections: detections, frame: frame, prototypes: prototypes)
+            }
+            .store(in: &cancellables)
+
+        // Keep lastPrototypes in sync — updated on main alongside detections.
+        visionManager.$currentPrototypes
+            .sink { [weak self] proto in
+                guard let self = self else { return }
+                self.lock.lock(); self.lastPrototypes = proto; self.lock.unlock()
             }
             .store(in: &cancellables)
     }
 
-    private func ingest(detections: [YoloDetection]) {
-        lock.lock(); let frame = lastSpatialFrame; lock.unlock()
+    private func ingest(detections: [YoloDetection], frame: SpatialFrame?, prototypes: MLMultiArray?) {
         guard let frame = frame else { return }
 
         let captureW = CGFloat(frame.imageResolution.x)
         let captureH = CGFloat(frame.imageResolution.y)
+        let depthW = CVPixelBufferGetWidth(frame.depthMap)
+        let depthH = CVPixelBufferGetHeight(frame.depthMap)
 
         var enriched: [Detection2DWithDepth] = []
         enriched.reserveCapacity(detections.count)
@@ -951,28 +1128,42 @@ final class TrackingManager: ObservableObject {
             guard det.confidence >= Self.scoreThreshold,
                   Self.allowedClassIds.contains(det.classId) else { continue }
 
-            // YoloDetection.boundingBox is in VisionManager's 640-normalised coords (Vision convention:
-            // origin top-left, y grows downward, 0..1).
             let bbox = det.boundingBox
 
-            guard let depth = DepthSampler.robustDepth(
-                depthMap: frame.depthMap,
-                normalisedROI: bbox,
-                roiFraction: Self.depthRoiFraction
-            ) else { continue }
+            // --- Mask-driven centroid + depth ---
+            let centroidUV: CGPoint
+            let depthMeters: Float
+
+            if let proto = prototypes,
+               let maskResult = MaskSampler.assemble(
+                   prototypes: proto,
+                   coefficients: det.maskCoefficients,
+                   bbox: bbox,
+                   depthWidth: depthW,
+                   depthHeight: depthH
+               ),
+               let d = DepthSampler.sample(depthMap: frame.depthMap, activePixels: maskResult.activePixels) {
+                centroidUV = maskResult.centroidUV
+                depthMeters = d
+            } else {
+                // Fallback: bbox midpoint + nil depth → skip this detection.
+                // (Prototypes may be nil when no YOLO model is active.)
+                continue
+            }
 
             let centroidPx = CGPoint(
-                x: (bbox.midX * captureW).rounded(),
-                y: (bbox.midY * captureH).rounded()
+                x: (centroidUV.x * captureW).rounded(),
+                y: (centroidUV.y * captureH).rounded()
             )
 
             enriched.append(Detection2DWithDepth(
                 boundingBox: bbox,
+                centroidUV: centroidUV,
                 centroidPx: centroidPx,
                 classId: det.classId,
                 className: VisionClassNames.name(for: det.classId),
                 confidence: det.confidence,
-                depthMeters: depth
+                depthMeters: depthMeters
             ))
         }
 
@@ -1000,7 +1191,7 @@ enum VisionClassNames {
 
 ```bash
 git add ICanSii_iOS/TrackingManager.swift
-git commit -m "feat(tracking): TrackingManager orchestrating YOLO+depth→3D tracks"
+git commit -m "feat(tracking): TrackingManager with MaskSampler+DepthSampler pipeline for YOLO→3D tracks"
 ```
 
 ---
@@ -1644,11 +1835,10 @@ Until this setup is done the test files are ignored by the build — they live o
 
 ## What's covered
 
-- `Kalman1DTests` — steady-state, outlier rejection, ramp
-- `PositionSmootherTests` — median with outlier
-- `VelocityEstimatorTests` — clamp, dt floor, EMA
+- `Kalman3DTests` — convergence, linear-ramp velocity stability, outlier rejection, predict-only velocity decay
+- `MaskSamplerTests` — centroid of full-bbox mask at geometric centre; bbox restriction ignores outside pixels; depth pixel coords in bounds
+- `DepthSamplerTests` — 15th-percentile over mask-active pixels; rejects zero/out-of-range; falls back to nil with no active pixels
 - `DeprojectionTests` — pixel+depth→3D numerical equivalence
-- `DepthSamplerTests` — ROI median on a hand-built CVPixelBuffer
 - `TrackerTests` — ID persistence, predictive mode, timeout
 - `VestMappingEngineTests` — closest selection, deadzone, offside, watchdog, back side
 ```
