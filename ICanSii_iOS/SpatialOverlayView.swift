@@ -64,7 +64,7 @@ struct SpatialOverlayView: View {
                 .frame(width: 10, height: 10)
                 .shadow(color: color.opacity(0.7), radius: 6)
 
-            Text("#\(obj.id) \(obj.className) \(String(format: \"%.1fm\", obj.distance))")
+            Text("#\(obj.id) \(obj.className) \(String(format: "%.1fm", obj.distance))")
                 .font(.caption2.bold())
                 .padding(.horizontal, 6)
                 .padding(.vertical, 3)

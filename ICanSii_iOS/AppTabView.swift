@@ -1,5 +1,6 @@
 import SwiftUI
 import QuartzCore
+import Combine
 
 struct AppTabView: View {
     @StateObject private var arManager = ARManager()
