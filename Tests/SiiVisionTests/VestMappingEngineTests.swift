@@ -76,7 +76,8 @@ final class VestMappingEngineTests: XCTestCase {
 
     func testRightBiasActivatesRightFullLeftOffside() {
         let engine = VestMappingEngine()
-        let state = engine.map(objects: [obj(x: 0.5, y: 0, z: -0.5)], timestamp: 0)
+        // Portrait logical axes: right bias is produced by positive sensor Y.
+        let state = engine.map(objects: [obj(x: 0, y: 0.5, z: -0.5)], timestamp: 0)
 
         let rightMax = VestLayout.all
             .filter { !$0.isBack && $0.side == .right }

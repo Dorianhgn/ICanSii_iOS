@@ -37,27 +37,29 @@ final class VestMappingEngine {
         let intensity = params.intensityMin + (params.intensityMax - params.intensityMin) * dClamped
 
         let isBack = target.position.z > 0
-        let x = target.position.x
+        // ARKit camera space is landscape-native; remap to portrait-logical axes.
+        let logicalX = target.position.y
+        let logicalY = -target.position.x
 
-        if abs(x) <= params.directionDeadzone {
+        if abs(logicalX) <= params.directionDeadzone {
             return makeState(
                 primaryIntensity: intensity,
                 offsideIntensity: intensity,
                 primarySide: .left,
                 alsoOtherSide: true,
                 isBack: isBack,
-                target: target
+                targetY: logicalY
             )
         }
 
-        if x > 0 {
+        if logicalX > 0 {
             return makeState(
                 primaryIntensity: intensity,
                 offsideIntensity: intensity * params.offsideIntensityFactor,
                 primarySide: .right,
                 alsoOtherSide: false,
                 isBack: isBack,
-                target: target
+                targetY: logicalY
             )
         }
 
@@ -67,7 +69,7 @@ final class VestMappingEngine {
             primarySide: .left,
             alsoOtherSide: false,
             isBack: isBack,
-            target: target
+            targetY: logicalY
         )
     }
 
@@ -77,11 +79,11 @@ final class VestMappingEngine {
         primarySide: VestCell.Side,
         alsoOtherSide: Bool,
         isBack: Bool,
-        target: TrackedObject3D
+        targetY: Float
     ) -> VestActivationState {
         var cells: [String: Float] = [:]
 
-        let normalizedY = max(-1, min(1, target.position.y))
+        let normalizedY = max(-1, min(1, targetY))
         let centerRowFloat = ((1 - normalizedY) * Float(VestLayout.rowsPerFace - 1)) / 2.0
 
         for cell in VestLayout.all where cell.isBack == isBack {

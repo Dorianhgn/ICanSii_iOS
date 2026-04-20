@@ -56,3 +56,14 @@ Purpose: Task execution journal. What was done, which files were touched, which 
 - Added regression coverage for UV orientation round-trip mapping.
   Files: Tests/SiiVisionTests/VisionCoordinateMapperTests.swift.
   Commands/checks: xcodebuild test attempt with only-testing ICanSii_iOSTests/VisionCoordinateMapperTests (blocked by scheme test action configuration).
+
+## 2026-04-20T10:04:09Z
+- Applied final portrait logical-axis convention in vest mapping (`logicalX = target.position.y`, `logicalY = -target.position.x`).
+  Files: ICanSii_iOS/VestMappingEngine.swift.
+  Commands/checks: manual code diff verification; get_errors on modified Swift files.
+- Realigned right-bias vest unit test with the finalized axis convention.
+  Files: Tests/SiiVisionTests/VestMappingEngineTests.swift.
+  Commands/checks: get_errors on modified test and engine files.
+- Prepared focused commit including mapping fix, aligned test expectation, and branch logs update.
+  Files: ICanSii_iOS/VestMappingEngine.swift, Tests/SiiVisionTests/VestMappingEngineTests.swift, docs/logs/swift/v4-dev/*.md.
+  Commands/checks: git status --short (scoped), git add (explicit file list), git commit.

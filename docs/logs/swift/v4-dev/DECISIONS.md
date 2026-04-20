@@ -61,3 +61,13 @@ Purpose: Lightweight ADRs. Why a path was chosen, what was rejected.
   - Move all overlay rendering into Metal immediately -> rejected: larger refactor than required for current alignment fix.
 - Rationale: One shared conversion path removes duplicated math and keeps orientation/crop behavior consistent across overlays.
 - Consequences: Overlay alignment maintenance is simpler, but correctness now depends on preserving the shared utility contract when changing orientation handling.
+
+## 2026-04-20
+- Date: 2026-04-20
+- Decision: Finalize vest portrait logical-axis remap as `logicalX = target.position.y` and `logicalY = -target.position.x`.
+- Context: Haptic left/right and vertical mapping needed to match the final physical interpretation used during portrait handling validation.
+- Alternatives considered:
+  - Keep `logicalX = -target.position.y`, `logicalY = target.position.x` -> rejected: did not match the finalized in-session interpretation.
+  - Keep direct sensor axes without remap -> rejected: preserves portrait/landscape coupling mismatch in haptic semantics.
+- Rationale: Explicit portrait logical remap with finalized signs preserves deterministic left/right and row targeting under the chosen handheld convention.
+- Consequences: Unit tests and future orientation-sensitive logic must follow the same sign convention to avoid silent regressions.

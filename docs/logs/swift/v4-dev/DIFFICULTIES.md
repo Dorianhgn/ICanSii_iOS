@@ -74,3 +74,12 @@ Purpose: Track blockers, root causes, and resolution paths.
 - Fix applied: Introduced shared Vision-to-screen transform utility, switched SpatialOverlayView to project camera-space points through capture UV -> Vision UV -> shared screen transform, and removed duplicate legacy transform extension from ContentView.
 - Validation result: get_errors reported no issues on changed files; xcodebuild build succeeded on generic iOS Simulator destination.
 - Open risk: Test action remains unavailable in the current Xcode scheme, so automated CLI test execution is still blocked.
+
+## 2026-04-20T10:04:09Z
+- Date: 2026-04-20
+- Context: Portrait-mode haptic interpretation for vest mapping after ARKit-space orientation adjustments.
+- Symptom: Directional mapping could still feel swapped depending on final axis sign convention; unit test input no longer matched runtime right-bias behavior.
+- Root cause (confirmed): Sign convention for portrait logical remap was finalized as `logicalX = target.position.y` and `logicalY = -target.position.x`, but the right-bias test case still encoded the previous sign choice.
+- Fix applied: Kept finalized runtime mapping in `VestMappingEngine` and updated right-bias test stimulus to positive sensor Y to represent logical right.
+- Validation result: `get_errors` returned no issues for `VestMappingEngine.swift` and `VestMappingEngineTests.swift`.
+- Open risk: CLI test execution remains blocked until Xcode scheme test action is enabled; physical-device confirmation is still required.

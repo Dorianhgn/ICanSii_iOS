@@ -41,9 +41,18 @@ Purpose: Human-readable summary of commits and why they matter.
 
 ## 2026-04-20T09:52:24Z
 - Date: 2026-04-20
-- Commit: (pending, next commit)
+- Commit: 82a3aca
 - Scope: Overlay reprojection alignment for tracked barycenters and shared Vision/screen transform utilities.
 - Why: Tracked barycenter markers remained offset from YOLO boxes/segmentations because the final coordinate conversion path was not fully shared.
 - Impact: 3D tracked markers now use the same Vision-to-screen conversion route as 2D overlays, reducing systematic offset and edge drift.
 - Datasets/targets impacted: ICanSii_iOS app runtime overlay behavior in RGB mode.
 - Follow-up: Validate on physical iPhone with camera motion and edge-of-frame objects.
+
+## 2026-04-20T10:04:09Z
+- Date: 2026-04-20
+- Commit: (pending, next commit)
+- Scope: Portrait logical-axis correction for vest haptic mapping and associated unit-test alignment.
+- Why: The previous axis convention still produced an interpretation mismatch between handheld portrait motion and vest left/right + up/down feedback.
+- Impact: Haptic side selection now follows the finalized portrait convention; right-bias test input updated to match runtime mapping semantics.
+- Datasets/targets impacted: ICanSii_iOS app runtime haptic behavior (`VestMappingEngine`) and unit tests (`VestMappingEngineTests`).
+- Follow-up: Validate on-device with left/right sweep and vertical sweep in portrait mode.
