@@ -56,3 +56,12 @@ Purpose: Track blockers, root causes, and resolution paths.
 - Fix applied: Corrected `VisionCoordinateMapper.rightOrientedVisionUVToCaptureUV(_:)` to use `CGPoint(x: uv.y, y: 1.0 - uv.x)` and changed `uvToScreen(_:, displayTransform:)` to apply `displayTransform` directly.
 - Validation result: Build passed cleanly with `xcodebuild`; coordinate mapping logic verified by code review and diff inspection.
 - Open risk: Physical device QA still needed to confirm real-world AR marker alignment across camera motion.
+
+## 2026-04-20T09:40:00Z
+- Date: 2026-04-20
+- Context: Post-fix verification for tracking backpressure and mask performance changes.
+- Symptom: Automated tests could not run via xcodebuild despite available test sources.
+- Root cause (confirmed): Scheme ICanSii_iOS is not configured for the Test action; initial destination request iPhone 16 was also unavailable in local simulator list.
+- Fix applied: Switched build verification to available destination iPhone 17 Pro and executed xcodebuild build successfully; documented test-action configuration blocker instead of claiming test pass.
+- Validation result: Build succeeded (xcodebuild); test run remained blocked with exit code 66 until scheme test action is configured.
+- Open risk: Behavior regressions can still exist without executable automated tests from CLI until Xcode scheme test action is enabled.

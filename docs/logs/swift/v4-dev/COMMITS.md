@@ -29,3 +29,12 @@ Purpose: Human-readable summary of commits and why they matter.
 - Why: 3D positional distance markers for tracked objects were failing to align with 2D visual YOLO bounding boxes due to duplicated rotation mappings.
 - Impact: 3D point markers accurately lock to semantic object centerings across iOS coordinate orientations without drifting.
 - Follow-up: Need physical validations on iPhone 17 Pro to confirm final visual-haptic alignment matrices.
+
+## 2026-04-20T09:40:00Z
+- Date: 2026-04-20
+- Commit: e580422
+- Scope: Tracking ingestion backpressure and mask sampling hot path.
+- Why: Producer/consumer imbalance caused frame backlog, latency growth, and memory pressure; scalar mask dot-product loop was too slow under large boxes.
+- Impact: Mask dot-product path is vectorized with Accelerate; tracking now drops incoming frames while processing one frame to prevent unbounded queue growth.
+- Datasets/targets impacted: ICanSii_iOS app target runtime behavior on live camera/depth streams.
+- Follow-up: Confirm dropped-frame rate and latency trade-off on physical device with Instruments Allocations + Time Profiler.

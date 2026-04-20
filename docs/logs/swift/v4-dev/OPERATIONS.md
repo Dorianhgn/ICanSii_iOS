@@ -37,3 +37,14 @@ Purpose: Task execution journal. What was done, which files were touched, which 
 - Corrected depth/UV coordinate mapping for Vision mask centroids and ARKit overlay projection.
   Files: `ICanSii_iOS/VisionCoordinateMapper.swift`, `ICanSii_iOS/SpatialOverlayView.swift`.
   Commands: Verified mapping changes via code inspection, `git diff`, and `xcodebuild` build success.
+
+## 2026-04-20T09:40:00Z
+- Replaced scalar per-channel mask dot-product loop with Accelerate vector primitive for prototype mask assembly.
+  Files: ICanSii_iOS/MaskSampler.swift.
+  Commands/checks: get_errors on modified Swift files; xcodebuild build -project ICanSii_iOS.xcodeproj -scheme ICanSii_iOS -destination 'platform=iOS Simulator,name=iPhone 17 Pro'.
+- Removed unbounded Combine receive queueing in tracking ingestion and introduced single-inflight drop policy with explicit lock and autoreleasepool.
+  Files: ICanSii_iOS/TrackingManager.swift.
+  Commands/checks: xcodebuild test attempts with iPhone 16 and iPhone 17 Pro destinations; inspected scheme/destination availability with xcodebuild -list and xcodebuild -showdestinations.
+- Committed performance and backpressure fix as a focused code commit.
+  Files: ICanSii_iOS/MaskSampler.swift, ICanSii_iOS/TrackingManager.swift.
+  Commands/checks: git add (explicit files), git commit, git show --name-only --oneline --no-patch HEAD.
