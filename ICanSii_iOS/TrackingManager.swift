@@ -16,19 +16,40 @@ final class TrackingManager: ObservableObject {
     private let tracker = Tracker()
     private let processingQueue = DispatchQueue(label: "sii.tracking.processing", qos: .userInitiated)
     private var cancellables: Set<AnyCancellable> = []
+    private let trackingLock = NSLock()
+    private var isTracking = false
 
     func bind(arManager: ARManager, visionManager: VisionManager) {
         _ = arManager // retained as API symmetry for caller wiring
 
         visionManager.$latestFrameOutput
             .compactMap { $0 }
-            .receive(on: processingQueue)
             .sink { [weak self] output in
-                self?.ingest(
-                    detections: output.detections,
-                    frame: output.spatialFrame,
-                    prototypes: output.prototypes
-                )
+                guard let self = self else { return }
+
+                self.trackingLock.lock()
+                if self.isTracking {
+                    self.trackingLock.unlock()
+                    return
+                }
+                self.isTracking = true
+                self.trackingLock.unlock()
+
+                self.processingQueue.async { [weak self] in
+                    guard let self = self else { return }
+
+                    autoreleasepool {
+                        self.ingest(
+                            detections: output.detections,
+                            frame: output.spatialFrame,
+                            prototypes: output.prototypes
+                        )
+                    }
+
+                    self.trackingLock.lock()
+                    self.isTracking = false
+                    self.trackingLock.unlock()
+                }
             }
             .store(in: &cancellables)
     }

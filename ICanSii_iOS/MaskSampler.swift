@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import CoreML
+import Accelerate
 
 enum MaskSampler {
     struct Result {
@@ -56,12 +57,12 @@ enum MaskSampler {
         for ph in ph0...ph1 {
             let rowBase = ph * protoSize
             for pw in pw0...pw1 {
-                let spatialIndex = rowBase + pw
-
                 var dot: Float = 0
-                for c in 0..<numChannels {
-                    dot += ptr[c * chanStride + spatialIndex] * coefficients[c]
-                }
+                vDSP_dotpr(
+                    ptr.advanced(by: rowBase + pw), vDSP_Stride(chanStride),
+                    coefficients, 1,
+                    &dot, vDSP_Length(numChannels)
+                )
 
                 let prob = 1.0 / (1.0 + exp(-Double(dot)))
                 if Float(prob) >= maskThreshold {
