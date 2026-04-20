@@ -274,23 +274,3 @@ struct FloatingPanel<Content: View>: View {
     }
 }
 
-// Formule mathématique pour annuler le recadrage (Crop)
-extension CGRect {
-    func transformedToScreen(using displayTransform: CGAffineTransform) -> CGRect {
-        let inverted = displayTransform.inverted()
-        let corners = [
-            CGPoint(x: minX, y: minY), CGPoint(x: maxX, y: minY),
-            CGPoint(x: minX, y: maxY), CGPoint(x: maxX, y: maxY)
-        ]
-        var minSx: CGFloat = 10000, minSy: CGFloat = 10000
-        var maxSx: CGFloat = -10000, maxSy: CGFloat = -10000
-        for corner in corners {
-            let tx = 1.0 - corner.y
-            let ty = corner.x
-            let screenUV = CGPoint(x: tx, y: ty).applying(inverted)
-            minSx = min(minSx, screenUV.x); minSy = min(minSy, screenUV.y)
-            maxSx = max(maxSx, screenUV.x); maxSy = max(maxSy, screenUV.y)
-        }
-        return CGRect(x: minSx, y: minSy, width: maxSx - minSx, height: maxSy - minSy)
-    }
-}

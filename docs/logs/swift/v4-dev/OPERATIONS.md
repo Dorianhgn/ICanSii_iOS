@@ -48,3 +48,11 @@ Purpose: Task execution journal. What was done, which files were touched, which 
 - Committed performance and backpressure fix as a focused code commit.
   Files: ICanSii_iOS/MaskSampler.swift, ICanSii_iOS/TrackingManager.swift.
   Commands/checks: git add (explicit files), git commit, git show --name-only --oneline --no-patch HEAD.
+
+## 2026-04-20T09:52:24Z
+- Unified Vision-to-screen mapping path for tracked 3D barycenter overlay and YOLO 2D overlays.
+  Files: ICanSii_iOS/SpatialOverlayView.swift, ICanSii_iOS/VisionCoordinateMapper.swift, ICanSii_iOS/VisionScreenTransform.swift, ICanSii_iOS/ContentView.swift.
+  Commands/checks: get_errors on modified files; xcodebuild -project ICanSii_iOS.xcodeproj -scheme ICanSii_iOS -configuration Debug -destination 'generic/platform=iOS Simulator' build.
+- Added regression coverage for UV orientation round-trip mapping.
+  Files: Tests/SiiVisionTests/VisionCoordinateMapperTests.swift.
+  Commands/checks: xcodebuild test attempt with only-testing ICanSii_iOSTests/VisionCoordinateMapperTests (blocked by scheme test action configuration).

@@ -109,6 +109,7 @@ final class TrackingManager: ObservableObject {
         let out = tracker.step(
             detections: enriched,
             intrinsics: frame.intrinsics,
+            cameraTransform: frame.cameraTransform,
             timestamp: frame.timestamp
         )
 

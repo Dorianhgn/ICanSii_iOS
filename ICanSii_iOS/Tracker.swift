@@ -24,6 +24,7 @@ final class Tracker {
         var lastCentroidPx: CGPoint
 
         var kalman: Kalman3D
+        var worldPosition: SIMD3<Float>
         var position: SIMD3<Float>
         var velocity: SIMD3<Float>
         var speedSmoothed: Float
@@ -44,6 +45,7 @@ final class Tracker {
     func step(
         detections: [Detection2DWithDepth],
         intrinsics K: simd_float3x3,
+        cameraTransform: simd_float4x4,
         timestamp t: TimeInterval
     ) -> [TrackedObject3D] {
         // Build candidate matches.
@@ -77,17 +79,17 @@ final class Tracker {
             }
             matchedTracks.insert(c.trackID)
             matchedDetections.insert(c.detIndex)
-            updateTrack(id: c.trackID, with: detections[c.detIndex], intrinsics: K, timestamp: t)
+            updateTrack(id: c.trackID, with: detections[c.detIndex], intrinsics: K, cameraTransform: cameraTransform, timestamp: t)
         }
 
         // Create tracks for unmatched detections.
         for i in detections.indices where !matchedDetections.contains(i) {
-            createTrack(from: detections[i], intrinsics: K, timestamp: t)
+            createTrack(from: detections[i], intrinsics: K, cameraTransform: cameraTransform, timestamp: t)
         }
 
         // Predict unmatched existing tracks, remove if stale.
         for trackID in Array(states.keys) where !matchedTracks.contains(trackID) {
-            predictTrack(id: trackID, timestamp: t)
+            predictTrack(id: trackID, cameraTransform: cameraTransform, timestamp: t)
         }
 
         return states.values
@@ -110,15 +112,20 @@ final class Tracker {
             .sorted { $0.id < $1.id }
     }
 
-    private func createTrack(from det: Detection2DWithDepth, intrinsics K: simd_float3x3, timestamp t: TimeInterval) {
+    private func createTrack(from det: Detection2DWithDepth, intrinsics K: simd_float3x3, cameraTransform: simd_float4x4, timestamp t: TimeInterval) {
         var kalman = Kalman3D(
             qPos: params.kalman3DProcessNoisePos,
             qVel: params.kalman3DProcessNoiseVel,
             rMeas: params.kalman3DMeasurementNoise
         )
 
-        let p = Deprojection.deproject(pixel: det.centroidPx, depthMeters: det.depthMeters, intrinsics: K)
-        kalman.seed(position: p)
+        let pLocal = Deprojection.deproject(pixel: det.centroidPx, depthMeters: det.depthMeters, intrinsics: K)
+        
+        // Convert Local to World
+        let p4 = cameraTransform * SIMD4<Float>(pLocal.x, pLocal.y, pLocal.z, 1.0)
+        let pWorld = SIMD3<Float>(p4.x, p4.y, p4.z)
+        
+        kalman.seed(position: pWorld)
 
         let state = TrackState(
             id: nextID,
@@ -128,7 +135,8 @@ final class Tracker {
             lastBoundingBox: det.boundingBox,
             lastCentroidPx: det.centroidPx,
             kalman: kalman,
-            position: p,
+            worldPosition: pWorld, 
+            position: pLocal, // Output in camera space for SpatialOverlayView
             velocity: .zero,
             speedSmoothed: 0,
             lastSeenTs: t,
@@ -140,15 +148,21 @@ final class Tracker {
         nextID += 1
     }
 
-    private func updateTrack(id: Int, with det: Detection2DWithDepth, intrinsics K: simd_float3x3, timestamp t: TimeInterval) {
+    private func updateTrack(id: Int, with det: Detection2DWithDepth, intrinsics K: simd_float3x3, cameraTransform: simd_float4x4, timestamp t: TimeInterval) {
         guard var state = states[id] else { return }
 
         let dt = Float(max(t - state.updatedTs, 1e-3))
-        let measurement = Deprojection.deproject(pixel: det.centroidPx, depthMeters: det.depthMeters, intrinsics: K)
-        state.kalman.update(measurement: measurement, dt: dt)
+        let pLocal = Deprojection.deproject(pixel: det.centroidPx, depthMeters: det.depthMeters, intrinsics: K)
+        
+        // Local to World
+        let p4 = cameraTransform * SIMD4<Float>(pLocal.x, pLocal.y, pLocal.z, 1.0)
+        let pWorld = SIMD3<Float>(p4.x, p4.y, p4.z)
 
-        let v = state.kalman.velocity
-        let speed = min(simd_length(v), params.maxSpeedMps)
+        // Filter runs strictly in stationary world space
+        state.kalman.update(measurement: pWorld, dt: dt)
+
+        let vWorld = state.kalman.velocity
+        let speed = min(simd_length(vWorld), params.maxSpeedMps)
 
         state.classId = det.classId
         state.className = det.className
@@ -156,8 +170,14 @@ final class Tracker {
         state.lastBoundingBox = det.boundingBox
         state.lastCentroidPx = det.centroidPx
 
-        state.position = state.kalman.position
-        state.velocity = v
+        state.worldPosition = state.kalman.position
+        
+        // Convert smoothed world position back to Local camera space for the UI
+        let invTransform = cameraTransform.inverse
+        let pLocal4 = invTransform * SIMD4<Float>(state.worldPosition.x, state.worldPosition.y, state.worldPosition.z, 1.0)
+        state.position = SIMD3<Float>(pLocal4.x, pLocal4.y, pLocal4.z)
+        
+        state.velocity = vWorld
         state.speedSmoothed = speed
 
         state.lastSeenTs = t
@@ -167,7 +187,7 @@ final class Tracker {
         states[id] = state
     }
 
-    private func predictTrack(id: Int, timestamp t: TimeInterval) {
+    private func predictTrack(id: Int, cameraTransform: simd_float4x4, timestamp t: TimeInterval) {
         guard var state = states[id] else { return }
 
         let age = t - state.lastSeenTs
@@ -180,7 +200,13 @@ final class Tracker {
         state.kalman.predict(dt: dt)
         state.kalman.applyVelocityDecay(params.velocityDecay)
 
-        state.position = state.kalman.position
+        state.worldPosition = state.kalman.position
+        
+        // World to Local for UI
+        let invTransform = cameraTransform.inverse
+        let pLocal4 = invTransform * SIMD4<Float>(state.worldPosition.x, state.worldPosition.y, state.worldPosition.z, 1.0)
+        state.position = SIMD3<Float>(pLocal4.x, pLocal4.y, pLocal4.z)
+        
         state.velocity = state.kalman.velocity
         state.speedSmoothed = min(simd_length(state.velocity), params.maxSpeedMps)
         state.updatedTs = t

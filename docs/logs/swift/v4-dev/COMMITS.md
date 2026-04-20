@@ -38,3 +38,12 @@ Purpose: Human-readable summary of commits and why they matter.
 - Impact: Mask dot-product path is vectorized with Accelerate; tracking now drops incoming frames while processing one frame to prevent unbounded queue growth.
 - Datasets/targets impacted: ICanSii_iOS app target runtime behavior on live camera/depth streams.
 - Follow-up: Confirm dropped-frame rate and latency trade-off on physical device with Instruments Allocations + Time Profiler.
+
+## 2026-04-20T09:52:24Z
+- Date: 2026-04-20
+- Commit: (pending, next commit)
+- Scope: Overlay reprojection alignment for tracked barycenters and shared Vision/screen transform utilities.
+- Why: Tracked barycenter markers remained offset from YOLO boxes/segmentations because the final coordinate conversion path was not fully shared.
+- Impact: 3D tracked markers now use the same Vision-to-screen conversion route as 2D overlays, reducing systematic offset and edge drift.
+- Datasets/targets impacted: ICanSii_iOS app runtime overlay behavior in RGB mode.
+- Follow-up: Validate on physical iPhone with camera motion and edge-of-frame objects.

@@ -51,3 +51,13 @@ Purpose: Lightweight ADRs. Why a path was chosen, what was rejected.
   - Buffer latest frame and overwrite pending frame -> rejected: additional shared-state complexity without immediate need for latest-only replay semantics.
 - Rationale: Single-inflight processing with frame drop gives strict upper bound on memory retained by queued frame payloads and removes latency accumulation from backlog.
 - Consequences: Some frames are intentionally skipped under load; downstream tracking quality now trades temporal density for bounded latency and memory safety.
+
+## 2026-04-20
+- Date: 2026-04-20
+- Decision: Centralize Vision-to-screen coordinate conversion in a shared transform utility used by both detection and tracking overlays.
+- Context: 2D YOLO overlays and 3D tracked barycenter overlays were using parallel but non-identical conversion paths.
+- Alternatives considered:
+  - Patch SpatialOverlayView only with ad hoc matrix tweaks -> rejected: high risk of future divergence and repeated regressions.
+  - Move all overlay rendering into Metal immediately -> rejected: larger refactor than required for current alignment fix.
+- Rationale: One shared conversion path removes duplicated math and keeps orientation/crop behavior consistent across overlays.
+- Consequences: Overlay alignment maintenance is simpler, but correctness now depends on preserving the shared utility contract when changing orientation handling.

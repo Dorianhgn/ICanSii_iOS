@@ -38,17 +38,17 @@ struct SpatialOverlayView: View {
         let u = fx * cameraSpace.x / depth + ppx
         let v = ppy - (fy * cameraSpace.y / depth)
 
-        let uv = CGPoint(x: CGFloat(u) / CGFloat(res.x), y: CGFloat(v) / CGFloat(res.y))
-        if uv.x < 0 || uv.x > 1 || uv.y < 0 || uv.y > 1 {
+        let captureUV = CGPoint(x: CGFloat(u) / CGFloat(res.x), y: CGFloat(v) / CGFloat(res.y))
+        if captureUV.x < 0 || captureUV.x > 1 || captureUV.y < 0 || captureUV.y > 1 {
             return nil
         }
 
-        let screen = uvToScreen(uv, displayTransform: arManager.displayTransform)
+        let visionUV = VisionCoordinateMapper.captureUVToRightOrientedVisionUV(captureUV)
+        let screen = VisionScreenTransform.rightOrientedVisionUVToScreenUV(
+            visionUV,
+            displayTransform: arManager.displayTransform
+        )
         return CGPoint(x: screen.x * viewSize.width, y: screen.y * viewSize.height)
-    }
-
-    private func uvToScreen(_ uv: CGPoint, displayTransform: CGAffineTransform) -> CGPoint {
-        return uv.applying(displayTransform)
     }
 
     @ViewBuilder

@@ -65,3 +65,12 @@ Purpose: Track blockers, root causes, and resolution paths.
 - Fix applied: Switched build verification to available destination iPhone 17 Pro and executed xcodebuild build successfully; documented test-action configuration blocker instead of claiming test pass.
 - Validation result: Build succeeded (xcodebuild); test run remained blocked with exit code 66 until scheme test action is configured.
 - Open risk: Behavior regressions can still exist without executable automated tests from CLI until Xcode scheme test action is enabled.
+
+## 2026-04-20T09:52:24Z
+- Date: 2026-04-20
+- Context: Visual mismatch between tracked barycenter markers and YOLO overlays in SwiftUI.
+- Symptom: Barycenter markers appeared systematically offset from 2D boxes and segmentation overlays, with stronger drift near viewport edges.
+- Root cause (confirmed): The final reprojection path was split across separate conversion implementations, creating a coordinate-space mismatch between tracked points and detection overlays.
+- Fix applied: Introduced shared Vision-to-screen transform utility, switched SpatialOverlayView to project camera-space points through capture UV -> Vision UV -> shared screen transform, and removed duplicate legacy transform extension from ContentView.
+- Validation result: get_errors reported no issues on changed files; xcodebuild build succeeded on generic iOS Simulator destination.
+- Open risk: Test action remains unavailable in the current Xcode scheme, so automated CLI test execution is still blocked.
