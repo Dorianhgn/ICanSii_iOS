@@ -32,3 +32,8 @@ Purpose: Task execution journal. What was done, which files were touched, which 
 - Fixed erroneous 90-degree sensor-to-view rotation from ARKit-derived 3D markers.
   Files: `ICanSii_iOS/SpatialOverlayView.swift`.
   Commands: `xcodebuild` clean compile verification.
+
+## 2026-04-20T07:56:33Z
+- Corrected depth/UV coordinate mapping for Vision mask centroids and ARKit overlay projection.
+  Files: `ICanSii_iOS/VisionCoordinateMapper.swift`, `ICanSii_iOS/SpatialOverlayView.swift`.
+  Commands: Verified mapping changes via code inspection, `git diff`, and `xcodebuild` build success.

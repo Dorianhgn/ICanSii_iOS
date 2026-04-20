@@ -47,3 +47,12 @@ Purpose: Track blockers, root causes, and resolution paths.
 - Fix applied: Removed the hard-coded UV flip from `uvToScreen`. Now directly applying `displayTransform.inverted()` to the intrinsic-provided projection pixel.
 - Validation result: Affine geometry transformations validated via Swift standalone test scripts; iOS simulator built cleanly (`** BUILD SUCCEEDED **`).
 - Open risk: None confirmed, requires physical iPhone real-world QA run.
+
+## 2026-04-20T07:56:33Z
+- Date: 2026-04-20
+- Context: Incorrect camera-space UV remapping between Vision segmentation/output and ARKit depth/capture coordinates.
+- Symptom: Depth values assigned to tracked objects were inconsistent with physical depth; near objects appeared far and markers jumped during device movement.
+- Root cause (confirmed): Vision UV remap function returned the wrong capture-space orientation, and the overlay projection used `displayTransform.inverted()` instead of the direct display transform for capture coordinates.
+- Fix applied: Corrected `VisionCoordinateMapper.rightOrientedVisionUVToCaptureUV(_:)` to use `CGPoint(x: uv.y, y: 1.0 - uv.x)` and changed `uvToScreen(_:, displayTransform:)` to apply `displayTransform` directly.
+- Validation result: Build passed cleanly with `xcodebuild`; coordinate mapping logic verified by code review and diff inspection.
+- Open risk: Physical device QA still needed to confirm real-world AR marker alignment across camera motion.

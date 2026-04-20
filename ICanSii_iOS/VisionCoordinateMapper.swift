@@ -6,7 +6,7 @@ enum VisionCoordinateMapper {
     /// Convert normalized Vision UV back to capture-image normalized UV.
     @inline(__always)
     static func rightOrientedVisionUVToCaptureUV(_ uv: CGPoint) -> CGPoint {
-        CGPoint(x: 1.0 - uv.y, y: uv.x)
+        CGPoint(x: uv.y, y: 1.0 - uv.x)
     }
 
     @inline(__always)
